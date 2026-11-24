@@ -13,6 +13,10 @@ use std::{
 
 use crate::color::{Rgba, parse as parse_color};
 
+/// The window a theme's media and container size queries are settled at, in
+/// CSS pixels. It is the same reference the layout pass uses.
+pub(crate) const VIEWPORT: (f32, f32) = (1280.0, 720.0);
+
 /// One declaration, and whether it carried `!important`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declaration {
@@ -30,6 +34,11 @@ pub struct Rule {
     /// `Some(true)` under `prefers-color-scheme: dark`, `Some(false)` under
     /// its light query, `None` under anything else.
     pub color_scheme: Option<bool>,
+    /// The `@container` conditions around the rule, outermost first. A
+    /// style query is settled against the theme's custom properties after
+    /// the root cascade is known; a size query is settled against the
+    /// reference window.
+    pub containers: Vec<String>,
     /// The folder or web address of the stylesheet the rule came from, for
     /// the files it names relatively.
     pub origin: Option<String>,
@@ -114,6 +123,18 @@ impl Stylesheet {
         self.layers.push(name.to_owned());
         (self.layers.len() - 1) as u32
     }
+
+    /// Registers a `@layer a, b;` statement. A layer named before any rule
+    /// is declared sits below the ones later named; that order is part of
+    /// the cascade even when the statement itself styles nothing.
+    fn declare_layers(&mut self, names: &str) {
+        for name in crate::color::split_top(names, ',') {
+            let name = name.trim();
+            if !name.is_empty() {
+                self.layer_rank(name);
+            }
+        }
+    }
 }
 
 /// A parse failure; the loader keeps what came before it.
@@ -150,12 +171,25 @@ pub fn parse_in(
 ) -> Stylesheet {
     let mut stylesheet = Stylesheet::default();
     let mut imported = Vec::new();
-    expand(text, base, &mut stylesheet, resolve, &mut imported, 0);
+    expand(
+        text,
+        base,
+        &mut stylesheet,
+        resolve,
+        &mut imported,
+        0,
+        None,
+        None,
+    );
     stylesheet
 }
 
 /// Reads a stylesheet, inlining each top-level `@import` where it appears so
 /// the rules after it override the ones it brought in, as CSS orders them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the parse state is threaded through by value so each import keeps its own"
+)]
 fn expand(
     text: &str,
     base: Option<&Path>,
@@ -163,6 +197,8 @@ fn expand(
     resolve: &mut impl FnMut(Option<&Path>, &str) -> Option<(String, PathBuf)>,
     imported: &mut Vec<PathBuf>,
     depth: usize,
+    layer: Option<u32>,
+    scheme: Option<bool>,
 ) {
     if depth > 16 {
         stylesheet
@@ -221,71 +257,90 @@ fn expand(
             break;
         };
         let statement = source[start..end].trim();
-        let is_import = statement
+        let at_rule = statement
             .strip_prefix('@')
-            .is_some_and(|rest| rest.trim_start().to_ascii_lowercase().starts_with("import"));
-        if is_import {
-            // Parse what came before, then the imported sheet, then go on.
+            .map(|rest| rest.trim_start())
+            .map(|rest| {
+                rest.split(|character: char| character.is_whitespace() || character == '(')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            });
+        let is_import = at_rule.as_deref() == Some("import");
+        if is_import || matches!(at_rule.as_deref(), Some("layer" | "charset" | "namespace")) {
+            // Parse what came before, then the imported sheet or the layer
+            // declaration, then go on. A statement outside a rule belongs to
+            // the stylesheet's preamble, not to the next rule's body.
             let before = &source[chunk_start..start];
             if !before.trim().is_empty() {
-                let mut at_rules = Vec::new();
                 parse_block(
                     before,
                     stylesheet,
-                    &mut at_rules,
-                    None,
+                    scheme,
+                    &mut Vec::new(),
                     origin.as_deref(),
-                    None,
+                    layer,
                 );
             }
-            let rest = statement
-                .strip_prefix('@')
-                .unwrap_or(statement)
-                .trim_start();
-            let rest = if rest.is_char_boundary(6) && rest[..6].eq_ignore_ascii_case("import") {
-                rest[6..].trim()
-            } else {
-                rest
-            };
-            match import_path(rest) {
-                Some((path, condition)) if !import_condition_allows(&condition) => {
-                    stylesheet.warnings.push(format!(
-                        "@import {path} does not apply here ({condition}); skipped"
-                    ));
-                }
-                Some((path, _)) if path.starts_with("data:") => {
-                    stylesheet.warnings.push(format!(
-                        "@import {path} is a data: URI, not a stylesheet, so it is skipped"
-                    ));
-                }
-                Some((path, _)) => {
-                    if imported.iter().any(|seen| seen == &path) {
-                        stylesheet
-                            .warnings
-                            .push(format!("@import {path} already read; skipped the loop"));
-                    } else {
-                        match resolve(base, &path) {
-                            Some((imported_text, full)) => {
-                                imported.push(full.clone());
-                                expand(
-                                    &imported_text,
-                                    full.parent(),
-                                    stylesheet,
-                                    resolve,
-                                    imported,
-                                    depth + 1,
-                                );
-                                imported.pop();
-                            }
-                            None => stylesheet
+            if is_import {
+                let rest = statement
+                    .strip_prefix('@')
+                    .unwrap_or(statement)
+                    .trim_start();
+                let rest = if rest.is_char_boundary(6) && rest[..6].eq_ignore_ascii_case("import") {
+                    rest[6..].trim()
+                } else {
+                    rest
+                };
+                match import_path(rest) {
+                    Some((path, condition)) => {
+                        let condition = ImportCondition::read(&condition);
+                        if !condition.supports || !media_applies(&condition.media) {
+                            stylesheet.warnings.push(format!(
+                                "@import {path} does not apply here ({}); skipped",
+                                condition.media
+                            ));
+                        } else if path.starts_with("data:") {
+                            stylesheet.warnings.push(format!(
+                                "@import {path} is a data: URI, not a stylesheet, so it is skipped"
+                            ));
+                        } else if imported.iter().any(|seen| seen == &path) {
+                            stylesheet
                                 .warnings
-                                .push(format!("could not read the @import {path}")),
+                                .push(format!("@import {path} already read; skipped the loop"));
+                        } else {
+                            let rank = condition
+                                .layer
+                                .as_deref()
+                                .map(|name| stylesheet.layer_rank(name))
+                                .or(layer);
+                            match resolve(base, &path) {
+                                Some((imported_text, full)) => {
+                                    imported.push(full.clone());
+                                    expand(
+                                        &imported_text,
+                                        full.parent(),
+                                        stylesheet,
+                                        resolve,
+                                        imported,
+                                        depth + 1,
+                                        rank,
+                                        media_scheme(&condition.media).or(scheme),
+                                    );
+                                    imported.pop();
+                                }
+                                None => stylesheet
+                                    .warnings
+                                    .push(format!("could not read the @import {path}")),
+                            }
                         }
                     }
+                    None => stylesheet
+                        .warnings
+                        .push(format!("an @import has no readable path: {rest}")),
                 }
-                None => stylesheet
-                    .warnings
-                    .push(format!("an @import has no readable path: {rest}")),
+            } else if at_rule.as_deref() == Some("layer") {
+                stylesheet.declare_layers(prelude_after(statement, "layer"));
             }
             index = end + 1;
             chunk_start = index;
@@ -295,14 +350,13 @@ fn expand(
     }
     let rest = &source[chunk_start..];
     if !rest.trim().is_empty() {
-        let mut at_rules = Vec::new();
         parse_block(
             rest,
             stylesheet,
-            &mut at_rules,
-            None,
+            scheme,
+            &mut Vec::new(),
             origin.as_deref(),
-            None,
+            layer,
         );
     }
 }
@@ -311,8 +365,8 @@ fn expand(
 fn parse_block(
     text: &str,
     stylesheet: &mut Stylesheet,
-    color_scheme: &mut Vec<Option<bool>>,
-    current: Option<bool>,
+    scheme: Option<bool>,
+    containers: &mut Vec<String>,
     origin: Option<&str>,
     layer: Option<u32>,
 ) {
@@ -349,10 +403,19 @@ fn parse_block(
                 b')' if quote.is_none() => depth = depth.saturating_sub(1),
                 b';' if quote.is_none() && depth == 0 => {
                     let prelude = text[start..index].trim();
-                    if prelude.starts_with('@') {
-                        stylesheet
-                            .warnings
-                            .push(format!("a statement inside a block is skipped: {prelude}"));
+                    if let Some(name) = prelude.strip_prefix('@') {
+                        let name = name
+                            .split(|character: char| character.is_whitespace() || character == '(')
+                            .next()
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        if name == "layer" {
+                            stylesheet.declare_layers(prelude_after(prelude, "layer"));
+                        } else {
+                            stylesheet
+                                .warnings
+                                .push(format!("a statement inside a block is skipped: {prelude}"));
+                        }
                     }
                     index += 1;
                     open = None;
@@ -394,13 +457,9 @@ fn parse_block(
                     stylesheet.fonts.push(font_face(body, origin));
                 }
                 "layer" => {
-                    let name = prelude
-                        .strip_prefix("@layer")
-                        .unwrap_or(prelude)
-                        .trim()
-                        .to_owned();
+                    let name = prelude_after(prelude, "layer").trim().to_owned();
                     let rank = stylesheet.layer_rank(&name);
-                    parse_block(body, stylesheet, color_scheme, current, origin, Some(rank));
+                    parse_block(body, stylesheet, scheme, containers, origin, Some(rank));
                 }
                 "media" | "supports" | "container" | "scope" | "document" => {
                     if lower == "supports" && !supports_applies(prelude) {
@@ -409,15 +468,25 @@ fn parse_block(
                     if lower == "media" && !media_applies(prelude) {
                         continue;
                     }
-                    let scheme = if lower == "media" {
+                    let inner = if lower == "media" {
                         media_scheme(prelude)
                     } else {
                         None
                     };
-                    let applies = scheme.or(current);
-                    color_scheme.push(applies);
-                    parse_block(body, stylesheet, color_scheme, applies, origin, layer);
-                    color_scheme.pop();
+                    let applies = match (inner, scheme) {
+                        // `.theme-light` inside a dark media query can never
+                        // apply, and neither can the other way around.
+                        (Some(inner), Some(outer)) if inner != outer => continue,
+                        (Some(inner), _) => Some(inner),
+                        (None, outer) => outer,
+                    };
+                    if lower == "container" {
+                        containers.push(prelude_after(prelude, "container").trim().to_owned());
+                        parse_block(body, stylesheet, applies, containers, origin, layer);
+                        containers.pop();
+                    } else {
+                        parse_block(body, stylesheet, applies, containers, origin, layer);
+                    }
                 }
                 "property" => {
                     let name = prelude.strip_prefix("@property").unwrap_or(prelude).trim();
@@ -450,7 +519,7 @@ fn parse_block(
                 _ => {
                     // Unknown at-rules with blocks (@page, @starting-style) may
                     // still hold declarations for the root; read their rules.
-                    parse_block(body, stylesheet, color_scheme, current, origin, layer);
+                    parse_block(body, stylesheet, scheme, containers, origin, layer);
                 }
             }
             continue;
@@ -462,14 +531,135 @@ fn parse_block(
         if selectors.is_empty() || body.trim().is_empty() {
             continue;
         }
-        stylesheet.rules.push(Rule {
-            selectors,
-            declarations: declarations(body),
-            color_scheme: color_scheme.last().copied().flatten(),
-            origin: origin.map(str::to_owned),
-            layer,
-        });
+        // CSS nesting: a rule's body may hold declarations, further rules,
+        // and conditional at-rules. Flatten the nested selectors with `&`
+        // replaced, then let this same reader settle the result.
+        let (own, nested) = split_rule_body(body);
+        if !own.trim().is_empty() {
+            stylesheet.rules.push(Rule {
+                selectors: selectors.clone(),
+                declarations: declarations(&own),
+                color_scheme: scheme,
+                containers: containers.clone(),
+                origin: origin.map(str::to_owned),
+                layer,
+            });
+        }
+        for (nested_prelude, nested_body) in nested {
+            let expanded = nested_css(&selectors, &nested_prelude, &nested_body);
+            parse_block(&expanded, stylesheet, scheme, containers, origin, layer);
+        }
     }
+}
+
+/// Splits a rule body at its top-level `;` into declarations and nested
+/// rules. Nested at-rules (`@media`, `@container`, ...) appear beside rules
+/// and keep their own body. Braces inside strings or parentheses are not
+/// structural.
+fn split_rule_body(body: &str) -> (String, Vec<(String, String)>) {
+    let mut own = String::new();
+    let mut nested = Vec::new();
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let mut chunk = 0;
+    let mut depth = 0u32;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' | b'\'' if quote == Some(byte) => quote = None,
+            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
+            b'(' if quote.is_none() => depth += 1,
+            b')' if quote.is_none() => depth = depth.saturating_sub(1),
+            b'{' if quote.is_none() && depth == 0 => {
+                let Some(close) = matching_brace(body, index) else {
+                    break;
+                };
+                let before = &body[chunk..index];
+                let (plain, prelude) = split_last_declaration(before);
+                own.push_str(plain);
+                let prelude = prelude.trim();
+                if !prelude.is_empty() {
+                    nested.push((prelude.to_owned(), body[index + 1..close].to_owned()));
+                }
+                index = close + 1;
+                chunk = index;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    own.push_str(&body[chunk..]);
+    (own, nested)
+}
+
+/// Splits `text` after its last top-level `;`, so a nested rule's prelude is
+/// not mistaken for a declaration.
+fn split_last_declaration(text: &str) -> (&str, &str) {
+    let bytes = text.as_bytes();
+    let mut depth = 0u32;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut last = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' | b'\'' if quote == Some(byte) => quote = None,
+            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
+            b'(' if quote.is_none() => depth += 1,
+            b')' if quote.is_none() => depth = depth.saturating_sub(1),
+            b';' if quote.is_none() && depth == 0 => last = Some(index + 1),
+            _ => {}
+        }
+    }
+    match last {
+        Some(at) => text.split_at(at),
+        None => ("", text),
+    }
+}
+
+/// A nested rule or at-rule, expressed for the flat parser.
+fn nested_css(parents: &[String], prelude: &str, body: &str) -> String {
+    let mut out = String::new();
+    if prelude.trim_start().starts_with('@') {
+        out.push_str(prelude.trim());
+        out.push('{');
+        for parent in parents {
+            out.push_str(parent);
+            out.push('{');
+            out.push_str(body);
+            out.push('}');
+        }
+        out.push('}');
+        return out;
+    }
+    for parent in parents {
+        for child in crate::color::split_top(prelude, ',') {
+            let child = child.trim();
+            let selector = if child.contains('&') {
+                child.replace('&', parent)
+            } else {
+                format!("{parent} {child}")
+            };
+            out.push_str(&selector);
+            out.push('{');
+            out.push_str(body);
+            out.push('}');
+        }
+    }
+    out
 }
 
 /// The byte offset of `needle` in `text`, ignoring ASCII case, as CSS
@@ -482,6 +672,15 @@ pub(crate) fn find_ignore_case(text: &str, needle: &str) -> Option<usize> {
     }
     text.windows(needle.len())
         .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// What follows an at-rule's name, ignoring the case CSS keywords allow.
+fn prelude_after<'a>(prelude: &'a str, name: &str) -> &'a str {
+    let rest = prelude.strip_prefix('@').unwrap_or(prelude).trim_start();
+    rest.get(..name.len())
+        .filter(|start| start.eq_ignore_ascii_case(name))
+        .and_then(|_| rest.get(name.len()..))
+        .unwrap_or("")
 }
 
 /// The path in `@import "x"`, `@import url(x)` or `@import url("x")`.
@@ -507,39 +706,482 @@ fn import_path(rest: &str) -> Option<(String, String)> {
     None
 }
 
-/// Whether the media/supports condition after an `@import` URL applies.
-fn import_condition_allows(condition: &str) -> bool {
-    let lower = condition.to_ascii_lowercase();
-    if lower.is_empty() {
+/// The `layer()`, `supports()` and media conditions an `@import` names,
+/// in the order CSS allows them.
+struct ImportCondition {
+    layer: Option<String>,
+    supports: bool,
+    media: String,
+}
+
+impl ImportCondition {
+    fn read(condition: &str) -> Self {
+        let mut condition = condition.trim();
+        let mut layer = None;
+        let mut supports = true;
+        loop {
+            if let Some(rest) = strip_prefix_ignore_case(condition, "layer") {
+                let rest = rest.trim_start();
+                if let Some(after) = rest.strip_prefix('(') {
+                    let name = matching_paren(after)
+                        .map(|end| after[..end].trim().to_owned())
+                        .unwrap_or_default();
+                    layer = Some(name);
+                    condition = matching_paren(after)
+                        .map(|end| after[end + 1..].trim_start())
+                        .unwrap_or("");
+                } else {
+                    layer = Some(String::new());
+                    condition = rest;
+                }
+                continue;
+            }
+            if let Some(rest) = strip_prefix_ignore_case(condition, "supports") {
+                let rest = rest.trim_start();
+                if let Some(after) = rest.strip_prefix('(') {
+                    let Some(end) = matching_paren(after) else {
+                        break;
+                    };
+                    supports &= supports_value(&after[..end]);
+                    condition = after[end + 1..].trim_start();
+                    continue;
+                }
+            }
+            break;
+        }
+        Self {
+            layer,
+            supports,
+            media: condition.trim().to_owned(),
+        }
+    }
+}
+
+/// `text` after `prefix`, compared without ASCII case.
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|start| start.eq_ignore_ascii_case(prefix))
+        .and_then(|_| text.get(prefix.len()..))
+}
+
+/// Whether a media query applies to the window at its reference size. A
+/// feature the window cannot know is left applicable, so a theme keeps the
+/// rules a current browser would show rather than losing them silently.
+fn media_applies(prelude: &str) -> bool {
+    let query = media_query_text(prelude);
+    query.is_empty()
+        || crate::color::split_top(query, ',')
+            .into_iter()
+            .any(media_query_could_apply)
+}
+
+/// The query text of an `@media` prelude or of a bare `@import` condition.
+fn media_query_text(prelude: &str) -> &str {
+    let prelude = prelude.trim();
+    if prelude.starts_with('@') {
+        prelude_after(prelude, "media").trim()
+    } else {
+        prelude
+    }
+}
+
+/// Whether a query could apply for either appearance. A colour-scheme
+/// condition is unknown when the stylesheet is parsed, so it is tried both
+/// ways; a rule that relies on a wide window still fails at the reference
+/// size, as it should.
+fn media_query_could_apply(query: &str) -> bool {
+    if query.to_ascii_lowercase().contains("prefers-color-scheme") {
+        media_query_applies_for(query, Some(true)) || media_query_applies_for(query, Some(false))
+    } else {
+        media_query_applies_for(query, None)
+    }
+}
+
+fn media_query_applies_for(query: &str, scheme: Option<bool>) -> bool {
+    let mut text = query.trim();
+    if text.is_empty() {
         return true;
     }
-    if lower.contains("print") && !lower.contains("screen") && !lower.contains("not print") {
-        return false;
+    let lower = text.to_ascii_lowercase();
+    let negated = lower.starts_with("not ");
+    if negated {
+        text = text[4..].trim_start();
+    } else if lower.starts_with("only ") {
+        text = text[5..].trim_start();
     }
-    if let Some(start) = lower.find("supports(") {
-        let rest = &condition[start + "supports".len()..];
-        if let Some((inside, _)) = take_parenthesized(rest)
-            && !supports_value(inside)
-        {
+    let mut result = true;
+    // A media type comes first: `screen and (...)`, `print`, `all`.
+    if !text.starts_with('(') {
+        let (kind, rest) = split_first_word(text);
+        if !kind.is_empty() {
+            result = !matches!(kind.to_ascii_lowercase().as_str(), "print" | "speech");
+            text = rest.trim_start();
+            text = strip_prefix_ignore_case(text, "and")
+                .unwrap_or("")
+                .trim_start();
+        }
+    }
+    if !text.is_empty() {
+        for part in split_condition(text, "and") {
+            result &= media_condition(part, scheme);
+        }
+    }
+    result != negated
+}
+
+fn media_condition(condition: &str, scheme: Option<bool>) -> bool {
+    let condition = condition.trim();
+    if condition.is_empty() {
+        return true;
+    }
+    if let Some(rest) = strip_prefix_ignore_case(condition, "not")
+        && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
+    {
+        return !media_condition(rest.trim_start(), scheme);
+    }
+    let or_parts = split_condition(condition, "or");
+    if or_parts.len() > 1 {
+        return or_parts.iter().any(|part| media_condition(part, scheme));
+    }
+    let and_parts = split_condition(condition, "and");
+    if and_parts.len() > 1 {
+        return and_parts.iter().all(|part| media_condition(part, scheme));
+    }
+    let inner = outer_parens(condition).unwrap_or(condition).trim();
+    if inner.is_empty() {
+        return true;
+    }
+    if let Some(rest) = strip_prefix_ignore_case(inner, "not")
+        && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
+    {
+        return !media_condition(rest.trim_start(), scheme);
+    }
+    media_feature(inner, scheme)
+}
+
+fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
+    let feature = feature.trim();
+    if let Some(value) = media_range(feature) {
+        return value;
+    }
+    let Some((name, value)) = feature.split_once(':') else {
+        // A boolean feature, such as `(hover)` or `(color)`, applies when the
+        // window has the thing at all. The zero-valued ones do not.
+        return !matches!(
+            feature.trim().to_ascii_lowercase().as_str(),
+            "monochrome" | "grid" | "color-index"
+        );
+    };
+    let name = name.trim().to_ascii_lowercase();
+    let value = value.trim().to_ascii_lowercase();
+    match name.as_str() {
+        "width" | "device-width" => compare(width(), &value),
+        "height" | "device-height" => compare(height(), &value),
+        "min-width" | "min-device-width" => width() >= media_length(&value).unwrap_or(0.0),
+        "max-width" | "max-device-width" => width() <= media_length(&value).unwrap_or(f32::MAX),
+        "min-height" | "min-device-height" => height() >= media_length(&value).unwrap_or(0.0),
+        "max-height" | "max-device-height" => height() <= media_length(&value).unwrap_or(f32::MAX),
+        "aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| close(viewport_ratio(), ratio)),
+        "min-aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| viewport_ratio() >= ratio),
+        "max-aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| viewport_ratio() <= ratio),
+        "orientation" => match value.as_str() {
+            "landscape" => width() >= height(),
+            "portrait" => height() > width(),
+            _ => true,
+        },
+        "prefers-color-scheme" => scheme.unwrap_or(true),
+        "prefers-reduced-motion" => value != "reduce",
+        "prefers-reduced-transparency" => value == "no-preference",
+        "prefers-reduced-data" => value != "reduce",
+        "prefers-contrast" => value == "no-preference",
+        "forced-colors" => value == "none",
+        "inverted-colors" => value != "inverted",
+        "hover" | "any-hover" => value != "none",
+        "pointer" | "any-pointer" => value == "fine",
+        "color" => compare(8.0, value.as_str()),
+        "min-color" => 8.0 >= media_number(&value).unwrap_or(0.0),
+        "max-color" => 8.0 <= media_number(&value).unwrap_or(f32::MAX),
+        "color-index" | "monochrome" => compare(0.0, value.as_str()),
+        "grid" => value == "0",
+        "resolution" | "min-resolution" => {
+            let wanted = resolution(&value).unwrap_or(0.0);
+            if name == "min-resolution" {
+                1.0 >= wanted
+            } else {
+                close(1.0, wanted)
+            }
+        }
+        "max-resolution" => 1.0 <= resolution(&value).unwrap_or(f32::MAX),
+        "color-gamut" => value == "srgb",
+        "dynamic-range" | "video-dynamic-range" => value == "standard",
+        "scan" => value == "progressive",
+        "update" => value != "slow",
+        "scripting" => value != "none",
+        "display-mode" => value == "browser",
+        "overflow-block" | "overflow-inline" => value != "none",
+        "environment-blending" => value == "opaque",
+        _ => true,
+    }
+}
+
+fn media_range(feature: &str) -> Option<bool> {
+    let normalized = feature
+        .replace(">=", " >= ")
+        .replace("<=", " <= ")
+        .replace('>', " > ")
+        .replace('<', " < ")
+        .replace('=', " = ");
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    if !(3..=5).contains(&words.len()) {
+        return None;
+    }
+    let operator = |text: &str| matches!(text, ">=" | "<=" | ">" | "<" | "=");
+    let compare = |left: f32, op: &str, right: f32| match op {
+        ">=" => left >= right,
+        "<=" => left <= right,
+        ">" => left > right,
+        "<" => left < right,
+        "=" => close(left, right),
+        _ => true,
+    };
+    if words.len() == 3 && operator(words[1]) {
+        let (name, value, flip) = if feature_value(words[0]).is_some() {
+            (words[0], words[2], false)
+        } else if feature_value(words[2]).is_some() {
+            (words[2], words[0], true)
+        } else {
+            return None;
+        };
+        let target = feature_value(name).unwrap_or(0.0);
+        let wanted = feature_number(name, value)?;
+        return Some(if flip {
+            compare(wanted, words[1], target)
+        } else {
+            compare(target, words[1], wanted)
+        });
+    }
+    if words.len() == 5 && operator(words[1]) && operator(words[3]) {
+        let name = words[2];
+        let target = feature_value(name)?;
+        let low = feature_number(name, words[0])?;
+        let high = feature_number(name, words[4])?;
+        return Some(compare(low, words[1], target) && compare(target, words[3], high));
+    }
+    None
+}
+
+fn feature_value(name: &str) -> Option<f32> {
+    match name.to_ascii_lowercase().as_str() {
+        "width" | "device-width" => Some(width()),
+        "height" | "device-height" => Some(height()),
+        "aspect-ratio" | "device-aspect-ratio" => Some(viewport_ratio()),
+        "resolution" => Some(1.0),
+        "color" => Some(8.0),
+        "color-index" | "monochrome" | "grid" => Some(0.0),
+        _ => None,
+    }
+}
+
+fn feature_number(feature: &str, value: &str) -> Option<f32> {
+    match feature.to_ascii_lowercase().as_str() {
+        "aspect-ratio" | "device-aspect-ratio" => ratio(value),
+        "resolution" => resolution(value),
+        "color" | "color-index" | "monochrome" | "grid" => media_number(value),
+        _ => media_length(value),
+    }
+}
+
+fn compare(actual: f32, value: &str) -> bool {
+    media_number(value).is_some_and(|wanted| close(actual, wanted))
+}
+
+fn close(left: f32, right: f32) -> bool {
+    (left - right).abs() <= 0.001 * left.abs().max(right.abs()).max(1.0)
+}
+
+fn width() -> f32 {
+    VIEWPORT.0
+}
+
+fn height() -> f32 {
+    VIEWPORT.1
+}
+
+fn viewport_ratio() -> f32 {
+    width() / height().max(1.0)
+}
+
+fn media_number(value: &str) -> Option<f32> {
+    value.trim().parse().ok()
+}
+
+fn media_length(value: &str) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    let parse = |suffix: &str, scale: f32| {
+        value
+            .strip_suffix(suffix)
+            .and_then(|number| number.trim().parse::<f32>().ok())
+            .map(|number| number * scale)
+    };
+    parse("px", 1.0)
+        .or_else(|| parse("rem", 16.0))
+        .or_else(|| parse("em", 16.0))
+        .or_else(|| parse("vw", width() / 100.0))
+        .or_else(|| parse("vh", height() / 100.0))
+        .or_else(|| parse("pt", 96.0 / 72.0))
+        .or_else(|| parse("pc", 16.0))
+        .or_else(|| parse("in", 96.0))
+        .or_else(|| parse("cm", 96.0 / 2.54))
+        .or_else(|| parse("mm", 96.0 / 25.4))
+        .or_else(|| value.parse().ok())
+}
+
+fn ratio(value: &str) -> Option<f32> {
+    if let Some((left, right)) = value.split_once('/') {
+        let left: f32 = left.trim().parse().ok()?;
+        let right: f32 = right.trim().parse().ok()?;
+        return (right.abs() > f32::EPSILON).then_some(left / right);
+    }
+    value.trim().parse().ok()
+}
+
+fn resolution(value: &str) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    let parse = |suffix: &str, scale: f32| {
+        value
+            .strip_suffix(suffix)
+            .and_then(|number| number.trim().parse::<f32>().ok())
+            .map(|number| number * scale)
+    };
+    parse("dppx", 1.0)
+        .or_else(|| parse("dpi", 1.0 / 96.0))
+        .or_else(|| parse("dpcm", 2.54 / 96.0))
+        .or_else(|| value.parse().ok())
+}
+
+/// Whether a `@container` condition applies. A style query reads the
+/// theme's settled custom properties; a size query uses the same reference
+/// window as a media query. `scroll-state()` and names a native window has
+/// no equivalent for stay applicable, as unknown media features do.
+pub(crate) fn container_applies(condition: &str, vars: &Vars) -> bool {
+    let condition = condition.trim();
+    // A named container puts its name before the query: `card style(...)`.
+    let condition = if condition.starts_with('(')
+        || strip_prefix_ignore_case(condition, "style")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['(', ' ', '\t', '\n']))
+        || strip_prefix_ignore_case(condition, "scroll-state")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['(', ' ', '\t', '\n']))
+        || strip_prefix_ignore_case(condition, "not")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['(', ' ', '\t', '\n']))
+    {
+        condition
+    } else {
+        let (_, rest) = split_first_word(condition);
+        rest.trim_start()
+    };
+    container_condition(condition, vars)
+}
+
+fn container_condition(condition: &str, vars: &Vars) -> bool {
+    let condition = condition.trim();
+    if condition.is_empty() {
+        return true;
+    }
+    if let Some(rest) = strip_prefix_ignore_case(condition, "not")
+        && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
+    {
+        return !container_condition(rest.trim_start(), vars);
+    }
+    let or_parts = split_condition(condition, "or");
+    if or_parts.len() > 1 {
+        return or_parts.iter().any(|part| container_condition(part, vars));
+    }
+    let and_parts = split_condition(condition, "and");
+    if and_parts.len() > 1 {
+        return and_parts.iter().all(|part| container_condition(part, vars));
+    }
+    let inner = outer_parens(condition).unwrap_or(condition).trim();
+    if let Some(rest) = strip_prefix_ignore_case(inner, "style") {
+        let rest = rest.trim_start();
+        return rest
+            .strip_prefix('(')
+            .and_then(|after| matching_paren(after).map(|end| &after[..end]))
+            .is_none_or(|query| style_query(query, vars));
+    }
+    if let Some(rest) = strip_prefix_ignore_case(inner, "scroll-state") {
+        let _ = rest;
+        return true;
+    }
+    media_feature(inner, None)
+}
+
+fn style_query(query: &str, vars: &Vars) -> bool {
+    for part in split_condition(query, "and") {
+        let part = outer_parens(part).unwrap_or(part).trim();
+        let Some(name) = part
+            .split([':', ' '])
+            .next()
+            .filter(|name| name.starts_with("--"))
+        else {
+            continue;
+        };
+        let actual = vars
+            .get(name)
+            .and_then(|value| vars.resolve(value))
+            .map(|value| value.trim().to_owned());
+        let Some((_, expected)) = part.split_once(':') else {
+            if actual.is_none() {
+                return false;
+            }
+            continue;
+        };
+        let expected = vars
+            .resolve(expected.trim())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| expected.trim().to_owned());
+        let Some(actual) = actual else {
+            return false;
+        };
+        if !same_tokens(&actual, &expected) {
             return false;
         }
     }
     true
 }
 
-/// Whether a media query could apply to the window: print is the one the
-/// native window never matches.
-fn media_applies(prelude: &str) -> bool {
-    let lower = prelude.to_ascii_lowercase();
-    !(lower.contains("print") && !lower.contains("screen") && !lower.contains("not print"))
+/// Compares two custom property values as token sequences: whitespace is
+/// not significant, and a theme's keyword case is not either.
+fn same_tokens(left: &str, right: &str) -> bool {
+    let normalize = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase()
+    };
+    normalize(left) == normalize(right)
+}
+
+fn split_first_word(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    (&text[..end], &text[end..])
+}
+
+fn outer_parens(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if !text.starts_with('(') {
+        return None;
+    }
+    matching_paren(&text[1..])
+        .filter(|end| end + 2 == text.len())
+        .map(|end| &text[1..end + 1])
 }
 
 /// Whether an `@supports` prelude applies. Features ReCore's native selector
 /// engine cannot match are treated as unsupported; the rest of CSS's modern
 /// features are treated as present, as a current browser would.
 fn supports_applies(prelude: &str) -> bool {
-    let condition = prelude.strip_prefix("@supports").unwrap_or(prelude).trim();
-    supports_value(condition)
+    supports_value(prelude_after(prelude, "supports").trim())
 }
 
 fn supports_value(condition: &str) -> bool {
@@ -560,13 +1202,18 @@ fn supports_value(condition: &str) -> bool {
         .and_then(|text| text.strip_suffix(')'))
         .unwrap_or(condition)
         .trim();
-    if inner.starts_with("selector(") {
-        let lower = inner.to_ascii_lowercase();
-        return !(lower.contains(":has(")
-            || lower.contains(":nth-")
-            || lower.contains(":first-")
-            || lower.contains(":last-")
-            || lower.contains(":only-"));
+    if let Some(selector) = strip_prefix_ignore_case(inner, "selector") {
+        let selector = selector.trim_start();
+        if let Some(inner) = selector
+            .strip_prefix('(')
+            .and_then(|rest| matching_paren(rest).map(|end| &rest[..end]))
+        {
+            let lower = inner.to_ascii_lowercase();
+            return !(lower.contains(":nth-")
+                || lower.contains(":first-")
+                || lower.contains(":last-")
+                || lower.contains(":only-"));
+        }
     }
     // A native window paints no blur, mask, container query or view
     // transition, so a theme's branch that needs one is not taken; its
@@ -616,25 +1263,6 @@ fn split_condition<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
     } else {
         vec![text]
     }
-}
-
-/// The text inside `text`'s first parenthesised group.
-fn take_parenthesized(text: &str) -> Option<(&str, &str)> {
-    let open = text.find('(')?;
-    let mut depth = 0u32;
-    for (offset, character) in text[open..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some((&text[open + 1..open + offset], &text[open + offset + 1..]));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Everything between `{` and its `}`.
@@ -1198,27 +1826,42 @@ fn strip_comments(text: &str) -> String {
 
 /// `prefers-color-scheme: dark` and its light sibling in a media query.
 fn media_scheme(prelude: &str) -> Option<bool> {
-    let lower = prelude.to_ascii_lowercase();
-    if !lower.contains("prefers-color-scheme") {
-        return None;
+    let query = media_query_text(prelude);
+    let mut required = None;
+    for branch in crate::color::split_top(query, ',') {
+        if !media_query_could_apply(branch) {
+            continue;
+        }
+        let scheme = media_query_scheme(branch)?;
+        match required {
+            None => required = Some(scheme),
+            Some(known) if known == scheme => {}
+            Some(_) => return None,
+        }
     }
-    let negated = lower
-        .split("prefers-color-scheme")
-        .next()
-        .map(|prefix| prefix.trim_end().trim_end_matches('(').trim_end())
-        .is_some_and(|prefix| prefix.ends_with("not"));
-    let scheme = if lower.contains("prefers-color-scheme: dark")
-        || lower.contains("prefers-color-scheme:dark")
-    {
-        Some(true)
-    } else if lower.contains("prefers-color-scheme: light")
-        || lower.contains("prefers-color-scheme:light")
-    {
-        Some(false)
-    } else {
-        None
+    required.flatten()
+}
+
+/// The appearance one media query asks for; `None` when it applies to both.
+fn media_query_scheme(query: &str) -> Option<Option<bool>> {
+    let lower = query.to_ascii_lowercase();
+    let at = lower.find("prefers-color-scheme")?;
+    let after = &lower[at + "prefers-color-scheme".len()..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let (value, _) = split_first_word(after);
+    let value = value.trim_matches([')', ';', ' ']);
+    let dark = match value {
+        "dark" => true,
+        "light" => false,
+        _ => return Some(None),
     };
-    scheme.map(|scheme| scheme != negated)
+    let prefix = lower[..at].trim_end();
+    let prefix = prefix.strip_suffix('(').unwrap_or(prefix).trim_end();
+    let negated = prefix
+        .rsplit_once(' ')
+        .is_some_and(|(_, word)| word.eq_ignore_ascii_case("not"))
+        || prefix.eq_ignore_ascii_case("not");
+    Some(Some(dark != negated))
 }
 
 /// The largest a value may grow to while its `var()`s are filled in. A
@@ -1571,7 +2214,11 @@ fn without_negations(selector: &str) -> String {
             Some(offset) => {
                 let start = index + offset;
                 out.push_str(&selector[index..start]);
-                let after = start + 4;
+                // `:not(` is five bytes, not four: the open parenthesis is
+                // part of the prefix. Starting one byte early made
+                // `matching_paren` treat the whole remainder as nested and
+                // drop every class after a negation.
+                let after = start + 5;
                 match matching_paren(&lower[after..]) {
                     Some(end) => index = after + end + 1,
                     None => break,
@@ -1946,6 +2593,53 @@ mod tests {
     }
 
     #[test]
+    fn media_queries_measure_the_reference_window() {
+        let sheet = parse(
+            r#"
+            @media (max-width: 600px) { .narrow { --x: 1; } }
+            @media (min-width: 600px) and (orientation: landscape) { .wide { --x: 2; } }
+            @media (pointer: coarse) { .touch { --x: 3; } }
+            @media (prefers-reduced-motion: reduce) { .still { --x: 4; } }
+            @media (hover: hover) { .mouse { --x: 5; } }
+            "#,
+            |_, _| None,
+        );
+        let selected: Vec<&str> = sheet
+            .rules
+            .iter()
+            .map(|rule| rule.selectors[0].as_str())
+            .collect();
+        assert_eq!(selected, [".wide", ".mouse"]);
+    }
+
+    #[test]
+    fn a_layer_statement_orders_layers_before_their_blocks() {
+        let theme = crate::load_str(
+            r#"
+            @layer theme, base;
+            @layer base { :root { --background-primary: #222222; } }
+            @layer theme { :root { --background-primary: #111111; } }
+            "#,
+            None,
+            &crate::Options::with_mode(crate::Mode::Dark),
+        )
+        .unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x22, 0x22, 0x22));
+    }
+
+    #[test]
+    fn a_container_style_query_keeps_its_rules_for_later() {
+        let sheet = parse(
+            "@container style(--mode: on) { :root { --x: 1; } } \
+             @container not style(--mode: on) { :root { --y: 2; } }",
+            |_, _| None,
+        );
+        assert_eq!(sheet.rules.len(), 2);
+        assert_eq!(sheet.rules[0].containers, ["style(--mode: on)"]);
+        assert_eq!(sheet.rules[1].containers, ["not style(--mode: on)"]);
+    }
+
+    #[test]
     fn font_faces_carry_their_data_uri() {
         let sheet = parse(
             r#"@font-face { font-family: "Test"; font-weight: 700; src: url("data:font/ttf;base64,AAEC") format("truetype"); }"#,
@@ -1973,6 +2667,14 @@ mod tests {
         assert_eq!(root_selector("html:not(.theme-dark)", true), Some(false));
         assert_eq!(
             root_selector("html:not([data-rl-mode=\"dark\"])", true),
+            Some(false)
+        );
+        assert_eq!(
+            root_selector("html:not(.custom).theme-dark", true),
+            Some(true)
+        );
+        assert_eq!(
+            root_selector("html:not(.custom).theme-light", true),
             Some(false)
         );
         assert_eq!(root_selector(":where(.theme-light)", true), Some(false));
@@ -2050,6 +2752,19 @@ mod tests {
     }
 
     #[test]
+    fn supports_reads_the_selector_features_the_window_can_match() {
+        let sheet = parse(
+            r#"
+            @supports selector(:has(.child)) { .has { --x: 1; } }
+            @supports selector(:nth-child(2)) { .nth { --x: 2; } }
+            "#,
+            |_, _| None,
+        );
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(sheet.rules[0].selectors[0], ".has");
+    }
+
+    #[test]
     fn unsupported_effects_take_their_fallback() {
         let sheet = parse(
             r#"
@@ -2081,6 +2796,52 @@ mod tests {
             },
         );
         assert_eq!(seen, vec!["screen.css"]);
+    }
+
+    #[test]
+    fn nested_rules_are_flattened_with_their_parent() {
+        let sheet = parse(
+            r#"
+            .a {
+                color: red;
+                content: "{";
+                &:hover { color: blue; }
+                &.b { color: green; }
+                @media (min-width: 1px) {
+                    .c & { color: gold; }
+                }
+            }
+            "#,
+            |_, _| None,
+        );
+        let selectors: Vec<&str> = sheet
+            .rules
+            .iter()
+            .map(|rule| rule.selectors[0].as_str())
+            .collect();
+        assert_eq!(selectors, [".a", ".a:hover", ".a.b", ".c .a"]);
+        assert_eq!(sheet.rules[0].declarations.len(), 2);
+        assert_eq!(sheet.rules[1].declarations[0].value, "blue");
+        assert_eq!(sheet.rules[3].declarations[0].value, "gold");
+    }
+
+    #[test]
+    fn an_import_can_name_a_layer_and_a_media_query() {
+        let sheet = parse(
+            "@import \"theme.css\" layer(theme) screen and (min-width: 600px);",
+            |_, path| {
+                Some((
+                    ":root { --background-primary: #123456; }".to_owned(),
+                    PathBuf::from(path),
+                ))
+            },
+        );
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(
+            sheet.layers[sheet.rules[0].layer.unwrap() as usize],
+            "theme"
+        );
+        assert_eq!(sheet.rules[0].color_scheme, None);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 //! The colours a Discord theme's CSS names, read into RGBA without pulling in
 //! a browser engine. Hex, `rgb()`, `rgba()`, `hsl()`, `hsla()`, `hwb()`,
-//! `oklab()`, `oklch()`, named colours, `transparent`, `color-mix()` and
-//! `light-dark()` are understood; anything else is left to the caller's
-//! fallback.
+//! `oklab()`, `oklch()`, `lab()`, `lch()`, `color()`, named colours,
+//! `transparent`, `color-mix()`, `light-dark()`, `contrast-color()` and the
+//! relative `rgb(from ...)` family are understood; anything else is left to
+//! the caller's fallback.
+
+use std::fmt::Write as _;
 
 /// A colour with straight (not premultiplied) alpha, as CSS works them out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -176,6 +179,23 @@ fn parse_depth(text: &str, light: bool, depth: usize) -> Option<Rgba> {
     if let Some(hex) = lower.strip_prefix('#') {
         return parse_hex(hex);
     }
+    if let Some(open) = text.find('(')
+        && let Some(inside) = function_body(text)
+    {
+        let name = text[..open].trim().to_ascii_lowercase();
+        let inside = inside.trim_start();
+        if inside
+            .get(..5)
+            .is_some_and(|start| start.eq_ignore_ascii_case("from "))
+        {
+            return parse_relative(&name, inside, light, depth + 1);
+        }
+    }
+    if lower.starts_with("contrast-color(") {
+        let inside = function_body(text)?;
+        let source = parse_depth(inside, light, depth + 1)?;
+        return Some(contrast_ink(source));
+    }
     if lower.starts_with("rgb(") || lower.starts_with("rgba(") {
         let inside = function_body(text)?;
         return parse_rgb(inside);
@@ -236,12 +256,28 @@ fn parse_triplet(text: &str) -> Option<Rgba> {
         return None;
     }
     let channel = |text: &str| -> Option<u8> {
-        let value: f32 = text.trim().parse().ok()?;
+        let value = numeric(text)?;
+        if value.angle {
+            return None;
+        }
+        let value = if value.percent {
+            value.value / 100.0 * 255.0
+        } else {
+            value.value
+        };
         Some(value.clamp(0.0, 255.0).round() as u8)
     };
     let alpha = match parts.get(3) {
         Some(alpha) => {
-            let value: f32 = alpha.trim().parse().ok()?;
+            let value = numeric(alpha)?;
+            if value.angle {
+                return None;
+            }
+            let value = if value.percent {
+                value.value / 100.0
+            } else {
+                value.value
+            };
             if value <= 1.0 {
                 (value.clamp(0.0, 1.0) * 255.0).round() as u8
             } else {
@@ -358,18 +394,315 @@ pub fn split_top(text: &str, separator: char) -> Vec<&str> {
     parts
 }
 
+/// A number from a colour expression: a plain number, a percentage, an
+/// angle, or a `calc()`/`min()`/`max()`/`clamp()` that settles to one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Numeric {
+    value: f32,
+    percent: bool,
+    angle: bool,
+}
+
+impl Numeric {
+    fn add(self, other: Self) -> Option<Self> {
+        if self.percent == other.percent && self.angle == other.angle {
+            return Some(Self {
+                value: self.value + other.value,
+                ..self
+            });
+        }
+        // CSS allows a unitless zero beside a percentage or an angle.
+        if self.value == 0.0 && !self.percent && !self.angle {
+            return Some(other);
+        }
+        if other.value == 0.0 && !other.percent && !other.angle {
+            return Some(self);
+        }
+        None
+    }
+
+    fn sub(self, other: Self) -> Option<Self> {
+        self.add(Self {
+            value: -other.value,
+            ..other
+        })
+    }
+
+    fn mul(self, other: Self) -> Option<Self> {
+        if (self.percent || self.angle) && (other.percent || other.angle) {
+            return None;
+        }
+        Some(Self {
+            value: self.value * other.value,
+            percent: self.percent || other.percent,
+            angle: self.angle || other.angle,
+        })
+    }
+
+    fn div(self, other: Self) -> Option<Self> {
+        if other.percent || other.angle || other.value == 0.0 {
+            return None;
+        }
+        Some(Self {
+            value: self.value / other.value,
+            ..self
+        })
+    }
+}
+
+/// Evaluates a numeric CSS value, including `calc()` and its relatives.
+fn numeric(text: &str) -> Option<Numeric> {
+    let text = text.trim();
+    if text.is_empty() || !text.is_ascii() {
+        return None;
+    }
+    if let Some((name, inside)) = whole_function(text) {
+        return match name.as_str() {
+            "calc" => Parser::new(inside).all(),
+            "min" | "max" => {
+                let mut values = crate::color::split_top(inside, ',')
+                    .into_iter()
+                    .map(numeric)
+                    .collect::<Option<Vec<_>>>()?;
+                let first = *values.first()?;
+                if values
+                    .iter()
+                    .any(|value| value.percent != first.percent || value.angle != first.angle)
+                {
+                    return None;
+                }
+                values.sort_by(|left, right| left.value.total_cmp(&right.value));
+                Some(if name == "min" {
+                    values[0]
+                } else {
+                    values[values.len() - 1]
+                })
+            }
+            "clamp" => {
+                let values = crate::color::split_top(inside, ',')
+                    .into_iter()
+                    .map(numeric)
+                    .collect::<Option<Vec<_>>>()?;
+                if values.len() != 3
+                    || values.iter().any(|value| {
+                        value.percent != values[0].percent || value.angle != values[0].angle
+                    })
+                {
+                    return None;
+                }
+                let value = values[1].value.max(values[0].value).min(values[2].value);
+                Some(Numeric { value, ..values[1] })
+            }
+            "abs" => {
+                let mut value = numeric(inside)?;
+                value.value = value.value.abs();
+                Some(value)
+            }
+            _ => None,
+        };
+    }
+    literal(text)
+}
+
+fn literal(text: &str) -> Option<Numeric> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+    }
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+    }
+    if !bytes
+        .get(..index)
+        .is_some_and(|number| number.iter().any(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let exponent = index;
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let digits = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if digits == index {
+            index = exponent;
+        }
+    }
+    let value: f32 = text[..index].parse().ok()?;
+    let unit = text[index..].trim();
+    let (percent, angle, value) = match unit.to_ascii_lowercase().as_str() {
+        "" => (false, false, value),
+        "%" => (true, false, value),
+        "deg" => (false, true, value),
+        "grad" => (false, true, value * 0.9),
+        "rad" => (false, true, value.to_degrees()),
+        "turn" => (false, true, value * 360.0),
+        _ => return None,
+    };
+    Some(Numeric {
+        value,
+        percent,
+        angle,
+    })
+}
+
+/// The name and inside of `name(...)` when it covers the whole text.
+fn whole_function(text: &str) -> Option<(String, &str)> {
+    let open = text.find('(')?;
+    let name = text[..open].trim().to_ascii_lowercase();
+    let close = matching_close(text, open)?;
+    (close + 1 == text.len()).then(|| (name, &text[open + 1..close]))
+}
+
+/// A tiny arithmetic parser for the numbers inside colour functions.
+struct Parser<'a> {
+    text: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text: text.as_bytes(),
+            at: 0,
+        }
+    }
+
+    fn all(mut self) -> Option<Numeric> {
+        let value = self.sum()?;
+        self.space();
+        (self.at == self.text.len()).then_some(value)
+    }
+
+    fn space(&mut self) {
+        while self.text.get(self.at).is_some_and(u8::is_ascii_whitespace) {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, byte: u8) -> bool {
+        self.space();
+        if self.text.get(self.at) == Some(&byte) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn sum(&mut self) -> Option<Numeric> {
+        let mut value = self.product()?;
+        loop {
+            if self.eat(b'+') {
+                value = value.add(self.product()?)?;
+            } else if self.eat(b'-') {
+                value = value.sub(self.product()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn product(&mut self) -> Option<Numeric> {
+        let mut value = self.unary()?;
+        loop {
+            if self.eat(b'*') {
+                value = value.mul(self.unary()?)?;
+            } else if self.eat(b'/') {
+                value = value.div(self.unary()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn unary(&mut self) -> Option<Numeric> {
+        self.space();
+        if self.eat(b'+') {
+            return self.unary();
+        }
+        if self.eat(b'-') {
+            let mut value = self.unary()?;
+            value.value = -value.value;
+            return Some(value);
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Option<Numeric> {
+        self.space();
+        if self.eat(b'(') {
+            let value = self.sum()?;
+            return self.eat(b')').then_some(value);
+        }
+        let start = self.at;
+        while self.text.get(self.at).is_some_and(u8::is_ascii_alphabetic) {
+            self.at += 1;
+        }
+        if self.text.get(self.at) == Some(&b'(') {
+            let inside = self.at + 1;
+            let mut depth = 1u32;
+            let mut end = inside;
+            while let Some(&byte) = self.text.get(end) {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            if depth != 0 {
+                return None;
+            }
+            let function = std::str::from_utf8(&self.text[start..=end]).ok()?;
+            self.at = end + 1;
+            return numeric(function);
+        }
+        let mut end = self.at;
+        while self
+            .text
+            .get(end)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !b"()+-*/,".contains(byte))
+        {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        let token = std::str::from_utf8(&self.text[start..end]).ok()?;
+        self.at = end;
+        literal(token)
+    }
+}
+
 /// `255`, `50%` or `1` (alpha), as an rgb component.
 fn component(text: &str, percent_is_full: bool) -> Option<f32> {
-    let text = text.trim();
-    if let Some(percent) = text.strip_suffix('%') {
-        let value: f32 = percent.trim().parse().ok()?;
-        return Some(if percent_is_full {
-            value / 100.0
-        } else {
-            value * 2.55
-        });
+    let value = numeric(text)?;
+    if value.angle {
+        return None;
     }
-    text.parse().ok()
+    Some(if value.percent {
+        value.value / 100.0 * if percent_is_full { 1.0 } else { 255.0 }
+    } else {
+        value.value
+    })
 }
 
 fn alpha_component(text: &str) -> Option<u8> {
@@ -387,7 +720,7 @@ fn parse_rgb(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -415,7 +748,7 @@ fn parse_hsl(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -435,7 +768,7 @@ fn parse_hwb(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -465,7 +798,7 @@ fn parse_oklab(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -484,7 +817,7 @@ fn parse_oklch(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -539,7 +872,7 @@ fn parse_lab(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -558,7 +891,7 @@ fn parse_lch(inside: &str) -> Option<Rgba> {
     let parts = if components.contains(',') {
         split_top(components, ',')
     } else {
-        components.split_whitespace().collect()
+        split_top(components, ' ')
     };
     if parts.len() < 3 {
         return None;
@@ -605,7 +938,7 @@ fn lab_rgba(lightness: f32, a: f32, b: f32, alpha: u8) -> Rgba {
 fn parse_color(inside: &str) -> Option<Rgba> {
     let inside = inside.trim();
     let (components, alpha) = split_alpha(inside);
-    let parts = components.split_whitespace().collect::<Vec<_>>();
+    let parts = split_top(components, ' ');
     if parts.len() < 4 {
         return None;
     }
@@ -638,6 +971,317 @@ fn parse_color(inside: &str) -> Option<Rgba> {
     ))
 }
 
+/// CSS Color 5's relative form: `rgb(from #123 r g b / 50%)`,
+/// `oklch(from red l c h)`. The source is any colour the reader knows; each
+/// channel may keep its source value by naming it (`r`, `g`, `b`, `h`, `s`,
+/// `l`, `a`, `c`) or give a new number or percentage.
+fn parse_relative(name: &str, inside: &str, light: bool, depth: usize) -> Option<Rgba> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let from = inside.trim_start().get(5..)?.trim_start();
+    let source_text = split_top(from, ' ').into_iter().next()?.trim();
+    if source_text.is_empty() {
+        return None;
+    }
+    let source = parse_depth(source_text, light, depth + 1)?;
+    let tail = from.get(source_text.len()..).unwrap_or("").trim();
+    let (components, alpha) = split_alpha(tail);
+    let parts: Vec<&str> = split_top(components, ' ');
+    let alpha = match alpha {
+        None => source.a,
+        Some(token) if token.trim().eq_ignore_ascii_case("alpha") => source.a,
+        Some(token) => alpha_component(&channel_text(
+            token,
+            &[("alpha", f32::from(source.a) / 255.0)],
+        ))?,
+    };
+    let result = match name {
+        "rgb" | "rgba" => {
+            let channels = [
+                ("r", f32::from(source.r)),
+                ("g", f32::from(source.g)),
+                ("b", f32::from(source.b)),
+            ];
+            let red = relative_number(parts.first()?, "r", 255.0, &channels)?;
+            let green = relative_number(parts.get(1)?, "g", 255.0, &channels)?;
+            let blue = relative_number(parts.get(2)?, "b", 255.0, &channels)?;
+            Rgba::rgba(
+                red.clamp(0.0, 255.0).round() as u8,
+                green.clamp(0.0, 255.0).round() as u8,
+                blue.clamp(0.0, 255.0).round() as u8,
+                alpha,
+            )
+        }
+        "hsl" | "hsla" => {
+            let (hue0, sat0, light0) = rgb_to_hsl(source);
+            let channels = [("h", hue0), ("s", sat0 * 100.0), ("l", light0 * 100.0)];
+            let hue = relative_hue(parts.first()?, "h", hue0, &channels)?;
+            let saturation = relative_fraction(parts.get(1)?, "s", sat0, &channels)?;
+            let lightness = relative_fraction(parts.get(2)?, "l", light0, &channels)?;
+            let (red, green, blue) = hsl_rgb(hue, saturation, lightness);
+            Rgba::rgba(channel(red), channel(green), channel(blue), alpha)
+        }
+        "hwb" => {
+            let (hue0, white0, black0) = rgb_to_hwb(source);
+            let channels = [("h", hue0), ("w", white0 * 100.0), ("b", black0 * 100.0)];
+            let hue = relative_hue(parts.first()?, "h", hue0, &channels)?;
+            let white = relative_fraction(parts.get(1)?, "w", white0, &channels)?;
+            let black = relative_fraction(parts.get(2)?, "b", black0, &channels)?;
+            let (red, green, blue) = hwb_rgb(hue, white, black);
+            Rgba::rgba(channel(red), channel(green), channel(blue), alpha)
+        }
+        "oklab" => {
+            let (lightness0, a0, b0) = rgb_to_oklab(source);
+            let channels = [("l", lightness0), ("a", a0), ("b", b0)];
+            let lightness = relative_number(parts.first()?, "l", 1.0, &channels)?;
+            let a = relative_signed(parts.get(1)?, "a", 0.4, &channels)?;
+            let b = relative_signed(parts.get(2)?, "b", 0.4, &channels)?;
+            oklab_rgba(lightness, a, b, alpha)
+        }
+        "oklch" => {
+            let (lightness0, a0, b0) = rgb_to_oklab(source);
+            let chroma0 = (a0 * a0 + b0 * b0).sqrt();
+            let hue0 = b0.atan2(a0).to_degrees().rem_euclid(360.0);
+            let channels = [("l", lightness0), ("c", chroma0), ("h", hue0)];
+            let lightness = relative_number(parts.first()?, "l", 1.0, &channels)?;
+            let chroma = relative_number(parts.get(1)?, "c", 0.4, &channels)?;
+            let hue = relative_hue(parts.get(2)?, "h", hue0, &channels)?;
+            oklab_rgba(
+                lightness,
+                chroma * hue.to_radians().cos(),
+                chroma * hue.to_radians().sin(),
+                alpha,
+            )
+        }
+        "lab" => {
+            let (lightness0, a0, b0) = rgb_to_lab(source);
+            let channels = [("l", lightness0), ("a", a0), ("b", b0)];
+            let lightness = relative_number(parts.first()?, "l", 100.0, &channels)?;
+            let a = relative_signed(parts.get(1)?, "a", 125.0, &channels)?;
+            let b = relative_signed(parts.get(2)?, "b", 125.0, &channels)?;
+            lab_rgba(lightness, a, b, alpha)
+        }
+        "lch" => {
+            let (lightness0, a0, b0) = rgb_to_lab(source);
+            let chroma0 = (a0 * a0 + b0 * b0).sqrt();
+            let hue0 = b0.atan2(a0).to_degrees().rem_euclid(360.0);
+            let channels = [("l", lightness0), ("c", chroma0), ("h", hue0)];
+            let lightness = relative_number(parts.first()?, "l", 100.0, &channels)?;
+            let chroma = relative_number(parts.get(1)?, "c", 150.0, &channels)?;
+            let hue = relative_hue(parts.get(2)?, "h", hue0, &channels)?;
+            lab_rgba(
+                lightness,
+                chroma * hue.to_radians().cos(),
+                chroma * hue.to_radians().sin(),
+                alpha,
+            )
+        }
+        "color" => {
+            let space = parts.first()?.to_ascii_lowercase();
+            let source_rgb = |value: u8| f32::from(value) / 255.0;
+            let channels = [parts.get(1)?, parts.get(2)?, parts.get(3)?];
+            let source_values = [
+                ("r", source_rgb(source.r)),
+                ("g", source_rgb(source.g)),
+                ("b", source_rgb(source.b)),
+            ];
+            let mut rgb = [0.0f32; 3];
+            for (index, token) in channels.iter().enumerate() {
+                let keyword = ["r", "g", "b"][index];
+                let source_value = match space.as_str() {
+                    "srgb-linear" => srgb_decode(source_values[index].1),
+                    _ => source_values[index].1,
+                };
+                let mut channels = source_values;
+                channels[index].1 = source_value;
+                rgb[index] = relative_number(token, keyword, 1.0, &channels)?;
+            }
+            if space == "srgb-linear" {
+                rgb = rgb.map(srgb_encode);
+            }
+            Rgba::rgba(channel(rgb[0]), channel(rgb[1]), channel(rgb[2]), alpha)
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Replaces the source channel keywords in a relative colour's channel,
+/// including inside `calc()`: `calc(1 * s)` reads the source saturation.
+fn channel_text(token: &str, channels: &[(&str, f32)]) -> String {
+    let mut out = String::with_capacity(token.len());
+    let bytes = token.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'-') {
+            let start = index;
+            index += 1;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                index += 1;
+            }
+            let word = &token[start..index];
+            if let Some((_, value)) = channels
+                .iter()
+                .find(|(keyword, _)| word.eq_ignore_ascii_case(keyword))
+                .filter(|(_, value)| value.is_finite())
+            {
+                let _ = write!(out, "{value}");
+            } else {
+                out.push_str(word);
+            }
+        } else if let Some(character) = token[index..].chars().next() {
+            out.push(character);
+            index += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn relative_number(
+    token: &str,
+    _keyword: &str,
+    full: f32,
+    channels: &[(&str, f32)],
+) -> Option<f32> {
+    number_or_percent(&channel_text(token, channels), full)
+}
+
+fn relative_signed(
+    token: &str,
+    _keyword: &str,
+    full: f32,
+    channels: &[(&str, f32)],
+) -> Option<f32> {
+    signed(&channel_text(token, channels), full)
+}
+
+fn relative_hue(
+    token: &str,
+    _keyword: &str,
+    _source: f32,
+    channels: &[(&str, f32)],
+) -> Option<f32> {
+    hue(&channel_text(token, channels))
+}
+
+fn relative_fraction(
+    token: &str,
+    _keyword: &str,
+    _source: f32,
+    channels: &[(&str, f32)],
+) -> Option<f32> {
+    let value = percent(&channel_text(token, channels))?;
+    Some(value.clamp(0.0, 1.0))
+}
+
+fn hwb_rgb(hue: f32, whiteness: f32, blackness: f32) -> (f32, f32, f32) {
+    let (mut red, mut green, mut blue) = hsl_rgb(hue, 1.0, 0.5);
+    let sum = whiteness + blackness;
+    if sum >= 1.0 {
+        let gray = whiteness / sum.max(f32::EPSILON);
+        (red, green, blue) = (gray, gray, gray);
+    } else {
+        let factor = 1.0 - sum;
+        red = red * factor + whiteness;
+        green = green * factor + whiteness;
+        blue = blue * factor + whiteness;
+    }
+    (red, green, blue)
+}
+
+fn contrast_ink(source: Rgba) -> Rgba {
+    let black = Rgba::rgb(0, 0, 0);
+    let white = Rgba::rgb(255, 255, 255);
+    if source.contrast(black) >= source.contrast(white) {
+        black
+    } else {
+        white
+    }
+}
+
+fn rgb_to_hsl(color: Rgba) -> (f32, f32, f32) {
+    let red = f32::from(color.r) / 255.0;
+    let green = f32::from(color.g) / 255.0;
+    let blue = f32::from(color.b) / 255.0;
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let lightness = (maximum + minimum) / 2.0;
+    let delta = maximum - minimum;
+    let saturation = if delta <= f32::EPSILON {
+        0.0
+    } else {
+        delta / (1.0 - (2.0 * lightness - 1.0).abs()).max(f32::EPSILON)
+    };
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if maximum == red {
+        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+    } else if maximum == green {
+        60.0 * ((blue - red) / delta + 2.0)
+    } else {
+        60.0 * ((red - green) / delta + 4.0)
+    };
+    (hue.rem_euclid(360.0), saturation, lightness)
+}
+
+fn rgb_to_hwb(color: Rgba) -> (f32, f32, f32) {
+    let (hue, _, _) = rgb_to_hsl(color);
+    let red = f32::from(color.r) / 255.0;
+    let green = f32::from(color.g) / 255.0;
+    let blue = f32::from(color.b) / 255.0;
+    let white = red.min(green).min(blue);
+    let black = 1.0 - red.max(green).max(blue);
+    (hue, white, black)
+}
+
+fn rgb_to_oklab(color: Rgba) -> (f32, f32, f32) {
+    let [red, green, blue] = linear_rgb(color);
+    let l = 0.412_221_47 * red + 0.536_332_54 * green + 0.051_445_99 * blue;
+    let m = 0.211_903_5 * red + 0.680_699_5 * green + 0.107_396_96 * blue;
+    let s = 0.088_302_46 * red + 0.281_718_84 * green + 0.629_978_7 * blue;
+    let l = l.cbrt();
+    let m = m.cbrt();
+    let s = s.cbrt();
+    (
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    )
+}
+
+fn rgb_to_lab(color: Rgba) -> (f32, f32, f32) {
+    let [red, green, blue] = linear_rgb(color);
+    let x = 0.412_456_4 * red + 0.357_576_1 * green + 0.180_437_5 * blue;
+    let y = 0.212_672_9 * red + 0.715_152_2 * green + 0.072_175 * blue;
+    let z = 0.019_333_9 * red + 0.119_192 * green + 0.950_304_1 * blue;
+    let f = |value: f32| {
+        if value > 0.008_856 {
+            value.cbrt()
+        } else {
+            (903.3 * value + 16.0) / 116.0
+        }
+    };
+    let fx = f(x / 0.950_47);
+    let fy = f(y);
+    let fz = f(z / 1.088_83);
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+fn linear_rgb(color: Rgba) -> [f32; 3] {
+    [
+        srgb_decode(f32::from(color.r) / 255.0),
+        srgb_decode(f32::from(color.g) / 255.0),
+        srgb_decode(f32::from(color.b) / 255.0),
+    ]
+}
+
 fn split_alpha(inside: &str) -> (&str, Option<&str>) {
     if let Some((components, alpha)) = inside.split_once('/') {
         (components.trim(), Some(alpha.trim()))
@@ -658,50 +1302,36 @@ fn channel(value: f32) -> u8 {
 }
 
 fn percent(text: &str) -> Option<f32> {
-    let text = text.trim();
-    if let Some(percent) = text.strip_suffix('%') {
-        percent
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|value| value / 100.0)
-    } else {
-        text.parse::<f32>().ok().map(|value| value / 100.0)
+    let value = numeric(text)?;
+    if value.angle {
+        return None;
     }
+    Some(value.value / 100.0)
 }
 
 fn number_or_percent(text: &str, full: f32) -> Option<f32> {
-    let text = text.trim();
-    if let Some(percent) = text.strip_suffix('%') {
-        Some(percent.trim().parse::<f32>().ok()? / 100.0 * full)
-    } else {
-        text.parse::<f32>().ok()
+    let value = numeric(text)?;
+    if value.angle {
+        return None;
     }
+    Some(if value.percent {
+        value.value / 100.0 * full
+    } else {
+        value.value
+    })
 }
 
 fn signed(text: &str, full: f32) -> Option<f32> {
-    let text = text.trim();
-    if let Some(percent) = text.strip_suffix('%') {
-        Some(percent.trim().parse::<f32>().ok()? / 100.0 * full)
-    } else {
-        text.parse::<f32>().ok()
-    }
+    number_or_percent(text, full)
 }
 
 /// A hue in degrees, radians, grades or turns.
 fn hue(text: &str) -> Option<f32> {
-    let text = text.trim().to_ascii_lowercase();
-    let parse = |suffix: &str, scale: f32| {
-        text.strip_suffix(suffix)
-            .and_then(|value| value.trim().parse::<f32>().ok())
-            .map(|value| value * scale)
-    };
-    parse("deg", 1.0)
-        .or_else(|| parse("grad", 0.9))
-        .or_else(|| parse("rad", 180.0 / std::f32::consts::PI))
-        .or_else(|| parse("turn", 360.0))
-        .or_else(|| text.parse::<f32>().ok())
-        .map(|value| value.rem_euclid(360.0))
+    let value = numeric(text)?;
+    if value.percent {
+        return None;
+    }
+    Some(value.value.rem_euclid(360.0))
 }
 
 fn hsl_rgb(hue: f32, saturation: f32, lightness: f32) -> (f32, f32, f32) {
@@ -734,7 +1364,7 @@ fn parse_color_mix(inside: &str, light: bool, depth: usize) -> Option<Rgba> {
     if !space.starts_with("in ") {
         return None;
     }
-    let linear = space.contains("srgb-linear");
+    let mixing = MixSpace::of(&space);
     let mut colours: Vec<(Rgba, Option<f32>)> = Vec::new();
     for arg in &args[1..] {
         let (colour_text, percentage) = take_percentage(arg);
@@ -781,49 +1411,173 @@ fn parse_color_mix(inside: &str, light: bool, depth: usize) -> Option<Rgba> {
     } else {
         1.0
     };
-    let decode = |value: u8| {
-        let value = f32::from(value) / 255.0;
-        if linear {
-            if value <= 0.040_45 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        } else {
-            value
-        }
-    };
-    let encode = |value: f32| {
-        let value = value.clamp(0.0, 1.0);
-        let value = if linear {
-            if value <= 0.003_130_8 {
-                value * 12.92
-            } else {
-                1.055 * value.powf(1.0 / 2.4) - 0.055
-            }
-        } else {
-            value
-        };
-        (value * 255.0).round().clamp(0.0, 255.0) as u8
-    };
     let mut alpha = 0.0f32;
     let mut channels = [0.0f32; 3];
+    let hue_index = mixing.hue_index();
+    let (mut hue_x, mut hue_y) = (0.0f32, 0.0f32);
     for ((colour, _), weight) in colours.iter().zip(&weights) {
         let share = f32::from(colour.a) / 255.0 * weight;
         alpha += share;
-        channels[0] += decode(colour.r) * share;
-        channels[1] += decode(colour.g) * share;
-        channels[2] += decode(colour.b) * share;
+        let coordinates = mixing.coordinates(*colour);
+        for (index, value) in coordinates.iter().enumerate() {
+            if Some(index) == hue_index {
+                let hue = value.to_radians();
+                hue_x += hue.cos() * share;
+                hue_y += hue.sin() * share;
+            } else {
+                channels[index] += value * share;
+            }
+        }
     }
     if alpha <= f32::EPSILON {
         return Some(Rgba::TRANSPARENT);
     }
-    Some(Rgba::rgba(
-        encode(channels[0] / alpha),
-        encode(channels[1] / alpha),
-        encode(channels[2] / alpha),
-        (alpha * alpha_multiplier * 255.0).round().clamp(0.0, 255.0) as u8,
-    ))
+    for (index, channel) in channels.iter_mut().enumerate() {
+        if Some(index) != hue_index {
+            *channel /= alpha;
+        }
+    }
+    if let Some(index) = hue_index {
+        channels[index] = hue_y.atan2(hue_x).to_degrees().rem_euclid(360.0);
+    }
+    let mut mixed = mixing.rgba(channels, 255);
+    mixed.a = (alpha * alpha_multiplier * 255.0).round().clamp(0.0, 255.0) as u8;
+    Some(mixed)
+}
+
+/// The interpolation space a `color-mix()` names. Spaces the reader has no
+/// conversion for mix in sRGB, as a browser's fallback would not, but keeps
+/// the colours a theme wrote usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixSpace {
+    Srgb,
+    Linear,
+    Hsl,
+    Hwb,
+    Oklab,
+    Oklch,
+    Lab,
+    Lch,
+}
+
+impl MixSpace {
+    fn of(space: &str) -> Self {
+        let name = space.strip_prefix("in ").unwrap_or(space).trim();
+        if name.contains("oklch") {
+            Self::Oklch
+        } else if name.contains("oklab") {
+            Self::Oklab
+        } else if name.contains("lch") {
+            Self::Lch
+        } else if name.contains("lab") {
+            Self::Lab
+        } else if name.contains("hwb") {
+            Self::Hwb
+        } else if name.contains("hsl") {
+            Self::Hsl
+        } else if name.contains("srgb-linear") {
+            Self::Linear
+        } else {
+            Self::Srgb
+        }
+    }
+
+    /// The channel holding a circular hue, for the spaces that have one.
+    fn hue_index(self) -> Option<usize> {
+        match self {
+            Self::Hsl | Self::Hwb => Some(0),
+            Self::Oklch | Self::Lch => Some(2),
+            Self::Srgb | Self::Linear | Self::Oklab | Self::Lab => None,
+        }
+    }
+
+    fn coordinates(self, color: Rgba) -> [f32; 3] {
+        match self {
+            Self::Srgb => [
+                f32::from(color.r) / 255.0,
+                f32::from(color.g) / 255.0,
+                f32::from(color.b) / 255.0,
+            ],
+            Self::Linear => linear_rgb(color),
+            Self::Hsl => {
+                let (hue, saturation, lightness) = rgb_to_hsl(color);
+                [hue, saturation, lightness]
+            }
+            Self::Hwb => {
+                let (hue, white, black) = rgb_to_hwb(color);
+                [hue, white, black]
+            }
+            Self::Oklab => {
+                let (lightness, a, b) = rgb_to_oklab(color);
+                [lightness, a, b]
+            }
+            Self::Oklch => {
+                let (lightness, a, b) = rgb_to_oklab(color);
+                [
+                    lightness,
+                    (a * a + b * b).sqrt(),
+                    b.atan2(a).to_degrees().rem_euclid(360.0),
+                ]
+            }
+            Self::Lab => {
+                let (lightness, a, b) = rgb_to_lab(color);
+                [lightness, a, b]
+            }
+            Self::Lch => {
+                let (lightness, a, b) = rgb_to_lab(color);
+                [
+                    lightness,
+                    (a * a + b * b).sqrt(),
+                    b.atan2(a).to_degrees().rem_euclid(360.0),
+                ]
+            }
+        }
+    }
+
+    fn rgba(self, coordinates: [f32; 3], alpha: u8) -> Rgba {
+        match self {
+            Self::Srgb => Rgba::rgba(
+                channel(coordinates[0]),
+                channel(coordinates[1]),
+                channel(coordinates[2]),
+                alpha,
+            ),
+            Self::Linear => Rgba::rgba(
+                channel(srgb_encode(coordinates[0])),
+                channel(srgb_encode(coordinates[1])),
+                channel(srgb_encode(coordinates[2])),
+                alpha,
+            ),
+            Self::Hsl => {
+                let (red, green, blue) = hsl_rgb(coordinates[0], coordinates[1], coordinates[2]);
+                Rgba::rgba(channel(red), channel(green), channel(blue), alpha)
+            }
+            Self::Hwb => {
+                let (red, green, blue) = hwb_rgb(coordinates[0], coordinates[1], coordinates[2]);
+                Rgba::rgba(channel(red), channel(green), channel(blue), alpha)
+            }
+            Self::Oklab => oklab_rgba(coordinates[0], coordinates[1], coordinates[2], alpha),
+            Self::Oklch => {
+                let hue = coordinates[2].to_radians();
+                oklab_rgba(
+                    coordinates[0],
+                    coordinates[1] * hue.cos(),
+                    coordinates[1] * hue.sin(),
+                    alpha,
+                )
+            }
+            Self::Lab => lab_rgba(coordinates[0], coordinates[1], coordinates[2], alpha),
+            Self::Lch => {
+                let hue = coordinates[2].to_radians();
+                lab_rgba(
+                    coordinates[0],
+                    coordinates[1] * hue.cos(),
+                    coordinates[1] * hue.sin(),
+                    alpha,
+                )
+            }
+        }
+    }
 }
 
 /// Splits a trailing `30%` from a colour, as `color-mix` writes it.
@@ -1097,5 +1851,68 @@ mod tests {
         let black = Rgba::rgb(0, 0, 0);
         let mixed = red.over(black);
         assert_eq!((mixed.r, mixed.g, mixed.b), (128, 0, 0));
+    }
+
+    #[test]
+    fn calc_settles_hsl_channels() {
+        assert_eq!(
+            parse("hsl(220, calc(1 * 8%), 23%)", false),
+            Some(Rgba::rgb(54, 57, 63))
+        );
+        assert_eq!(
+            parse("hsla(213, calc(1 * 13%), calc(75% - 0% + 0%), 1)", false),
+            Some(Rgba::rgb(183, 190, 200))
+        );
+    }
+
+    #[test]
+    fn relative_colours_keep_or_replace_their_source_channels() {
+        assert_eq!(
+            parse("rgb(from #336699 r g b)", true),
+            Some(Rgba::rgb(0x33, 0x66, 0x99))
+        );
+        assert_eq!(
+            parse("rgb(from #336699 r g b / 50%)", true),
+            Some(Rgba::rgba(0x33, 0x66, 0x99, 128))
+        );
+        assert_eq!(
+            parse("hsl(from #ff0000 h s l)", true),
+            Some(Rgba::rgb(255, 0, 0))
+        );
+        let round_trip = parse("oklch(from #336699 l c h)", true).unwrap();
+        assert_eq!(
+            (round_trip.r, round_trip.g, round_trip.b),
+            (0x33, 0x66, 0x99)
+        );
+        let newer = parse("oklch(from #336699 0.8 c h)", true).unwrap();
+        assert!(newer.r < 150 && newer.g > 150, "{newer:?}");
+        assert_eq!(
+            parse("hsl(from #dcdcde h calc(1 * s) l/alpha)", true),
+            Some(Rgba::rgb(0xdc, 0xdc, 0xde))
+        );
+    }
+
+    #[test]
+    fn contrast_color_picks_the_ink_that_reads() {
+        assert_eq!(
+            parse("contrast-color(#000)", true),
+            Some(Rgba::rgb(255, 255, 255))
+        );
+        assert_eq!(
+            parse("contrast-color(#fff)", true),
+            Some(Rgba::rgb(0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn color_mix_reads_lab_and_oklab() {
+        let oklab = parse("color-mix(in oklab, #000, #fff)", true).unwrap();
+        assert_eq!((oklab.r, oklab.g, oklab.b), (0x63, 0x63, 0x63));
+        let lab = parse("color-mix(in lab, #000, #fff)", true).unwrap();
+        assert!(lab.r > oklab.r && lab.r < 140, "{lab:?}");
+        let polar = parse("color-mix(in oklch, #ff0000, #0000ff)", true).unwrap();
+        assert!(polar.r > 80 && polar.b > 80, "{polar:?}");
+        let hsl = parse("color-mix(in hsl, #ff0000, #00ff00)", true).unwrap();
+        assert!(hsl.r > 100 && hsl.g > 100, "{hsl:?}");
     }
 }

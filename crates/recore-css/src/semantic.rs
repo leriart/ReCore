@@ -23,8 +23,8 @@ use style_engine::{
     ComputedStyle, StyleEngine, compute_node,
     css::{
         property::{
-            BackgroundImage, BorderStyle, DeclValue, Display, FamilyName,
-            Gradient as EngineGradient, PropertyId, TextTransformKind,
+            BackgroundImage, BorderStyle, ContentPiece, ContentValue, DeclValue, Display,
+            FamilyName, Gradient as EngineGradient, PropertyId, TextTransformKind,
         },
         stylesheet::{MediaEnv, parse_stylesheet},
         value::{ColorValue, LengthPercentage, ResolveCtx},
@@ -40,7 +40,7 @@ use crate::{
 
 /// The viewport a theme is settled at. CSS themes are written for a desktop
 /// window; `vw`/`vh`, percentages and flex/grid tracks resolve against this.
-pub(crate) const VIEWPORT: (f32, f32) = (1280.0, 720.0);
+pub(crate) const VIEWPORT: (f32, f32) = crate::css::VIEWPORT;
 
 /// A theme's semantic values, ready for the window.
 pub(crate) struct Computed {
@@ -201,11 +201,11 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
             out.push_str(name);
             out.push_str(" {\n");
         }
-        let selectors: Vec<&str> = rule
+        let selectors: Vec<String> = rule
             .selectors
             .iter()
-            .map(String::as_str)
             .filter(|selector| region_selector(selector))
+            .map(|selector| normalize_selector(selector).into_owned())
             .collect();
         if selectors.is_empty() {
             if layer.is_some() {
@@ -246,6 +246,68 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
 /// `div { ... }` would paint the rail in a browser-free window. The root tags
 /// and the window-wide pseudo-elements are the exceptions, as they are in the
 /// lightweight matcher.
+/// Rewrites a generated class such as `chat_z_gUBg` to the stable prefix
+/// `chat_` that ReCore's synthetic nodes carry. Discord hashes the suffix
+/// differently per build, so exact generated names otherwise never match.
+fn normalize_selector(selector: &str) -> Cow<'_, str> {
+    let mut out = String::with_capacity(selector.len());
+    let mut changed = false;
+    let mut index = 0;
+    let mut quote: Option<char> = None;
+    let bytes = selector.as_bytes();
+    while index < bytes.len() {
+        let character = selector[index..].chars().next().unwrap_or_default();
+        if let Some(active) = quote {
+            if character == active {
+                quote = None;
+            }
+            out.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+        match character {
+            '"' | '\'' => {
+                quote = Some(character);
+                out.push(character);
+                index += 1;
+            }
+            '.' => {
+                out.push('.');
+                let start = index + 1;
+                index = start;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    index += 1;
+                }
+                let class = &selector[start..index];
+                let known = NODES
+                    .iter()
+                    .flat_map(|node| node.classes.iter())
+                    .filter(|known| native::class_prefix_matches(known, class))
+                    .max_by_key(|known| known.len());
+                match known {
+                    Some(known) => {
+                        out.push_str(known);
+                        changed |= !class.eq_ignore_ascii_case(known);
+                    }
+                    None => out.push_str(class),
+                }
+            }
+            _ => {
+                out.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(selector)
+    }
+}
+
 fn region_selector(selector: &str) -> bool {
     let lower = selector.to_ascii_lowercase();
     if lower.contains("::selection")
@@ -295,6 +357,21 @@ fn active_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
             continue;
         }
         for selector in &rule.selectors {
+            // Structural and sibling selectors depend on the nodes around
+            // the one they name. Keep the whole synthetic tree for them,
+            // rather than a pruned set where a region's real position and
+            // siblings have disappeared.
+            if selector.contains(":nth-")
+                || selector.contains(":first-")
+                || selector.contains(":last-")
+                || selector.contains(":only-")
+                || selector.contains(" > ")
+                || selector.contains(" + ")
+                || selector.contains(" ~ ")
+            {
+                roles.extend(NODES.iter().map(|node| node.role));
+                break;
+            }
             for node in NODES.iter().filter(|node| node.role != Role::Root) {
                 if node.classes.iter().any(|class| selector.contains(class))
                     || node.aria_role.is_some_and(|aria| selector.contains(aria))
@@ -373,6 +450,9 @@ fn palette_name(name: &str) -> bool {
         "--background",
         "--chat-",
         "--text",
+        "--normal-",
+        "--muted-",
+        "--main-",
         "--header",
         "--brand",
         "--control",
@@ -457,6 +537,17 @@ fn replace_colors(value: &str, light: bool) -> Option<String> {
     const FUNCTIONS: &[&str] = &[
         "color-mix(",
         "light-dark(",
+        "contrast-color(",
+        "rgb(from ",
+        "rgba(from ",
+        "hsl(from ",
+        "hsla(from ",
+        "hwb(from ",
+        "oklab(from ",
+        "oklch(from ",
+        "lab(from ",
+        "lch(from ",
+        "color(from ",
         "oklab(",
         "oklch(",
         "lab(",
@@ -704,15 +795,27 @@ fn native_from_styles(
     dark: bool,
 ) -> NativeStyle {
     let mut style = NativeStyle::default();
+    // A page that never names `color` must keep the palette's ink, not the
+    // engine's default black. Many wallpaper and effect themes leave the
+    // page's colour to Discord.
+    let root_text = sheet.rules.iter().any(|rule| {
+        rule.declarations
+            .iter()
+            .any(|declaration| declaration.name.eq_ignore_ascii_case("color"))
+            && rule
+                .selectors
+                .iter()
+                .any(|selector| css::root_selector(selector, dark).is_some())
+    });
     // `:root` rules land on `html`; direct page rules land on `body`. The
     // window has one page surface, so read both: html first, body over it.
     let html = styles.get(&Key::Html);
     let page = styles.get(&Key::Body);
     if let Some(root) = html {
-        apply(&mut style, Role::Root, false, root, None, dark);
+        apply(&mut style, Role::Root, false, root, None, dark, root_text);
     }
     if let Some(page) = page {
-        apply(&mut style, Role::Root, false, page, html, dark);
+        apply(&mut style, Role::Root, false, page, html, dark, root_text);
     }
     for node in NODES.iter().filter(|node| node.role != Role::Root) {
         let parent = match node.parent {
@@ -723,7 +826,9 @@ fn native_from_styles(
         };
         let region = styles.get(&Key::Region(node.role));
         if let Some(region) = region {
-            apply(&mut style, node.role, false, region, parent, dark);
+            apply(
+                &mut style, node.role, false, region, parent, dark, root_text,
+            );
         }
         if node.role == Role::Message
             && let Some(nested) = styles.get(&Key::Nested(node.role))
@@ -735,12 +840,29 @@ fn native_from_styles(
                 nested,
                 region.or(parent),
                 dark,
+                root_text,
             );
         }
         if let Some(hover) = styles.get(&Key::Hover(node.role)) {
-            apply(&mut style, node.role, true, hover, region.or(parent), dark);
+            apply(
+                &mut style,
+                node.role,
+                true,
+                hover,
+                region.or(parent),
+                dark,
+                root_text,
+            );
         } else if let Some(focus) = styles.get(&Key::Focus(node.role)) {
-            apply(&mut style, node.role, true, focus, region.or(parent), dark);
+            apply(
+                &mut style,
+                node.role,
+                true,
+                focus,
+                region.or(parent),
+                dark,
+                root_text,
+            );
         }
     }
     let (selection, placeholder) = channels(sheet, dark);
@@ -761,6 +883,7 @@ fn apply(
     computed: &ComputedStyle,
     parent: Option<&ComputedStyle>,
     dark: bool,
+    root_text: bool,
 ) {
     let background = color(computed.background_color(), computed, dark);
     let mut gradient = None;
@@ -782,7 +905,13 @@ fn apply(
         native::clear_gradient(style, role, hover);
     }
 
-    if let Some(text) = color(computed.color(), computed, dark) {
+    if (role != Role::Root || root_text)
+        && let Some(text) = color(computed.color(), computed, dark)
+        // The engine starts every page at black. A theme that never names a
+        // page colour leaves its regions to Discord's palette, not to that
+        // default; only an explicit black survives.
+        && (root_text || text != Rgba::rgb(0, 0, 0))
+    {
         let inherited = parent.and_then(|parent| color(parent.color(), parent, dark));
         if inherited != Some(text) {
             native::set_text(style, role, text);
@@ -886,20 +1015,17 @@ fn apply_pseudos(style: &mut NativeStyle, pseudos: &[(Role, bool, PseudoStyle)])
             let background = native::fade(background, fade);
             if pseudo.thin {
                 style.line = Some(background);
-            } else {
+            } else if pseudo.overlay {
                 native::set_background(style, role, false, background);
             }
         }
-        if let Some(gradient) = &pseudo.gradient {
+        if pseudo.overlay
+            && let Some(gradient) = &pseudo.gradient
+        {
             native::set_gradient(style, role, false, gradient.clone());
         }
         if let Some(line) = pseudo.line {
             style.line = Some(native::fade(line, fade));
-        }
-        if let Some(text) = pseudo.text
-            && style.text != Some(text)
-        {
-            native::set_text(style, role, text);
         }
         if let Some(shadow) = pseudo.shadow {
             native::set_shadow(style, role, shadow);
@@ -911,10 +1037,12 @@ struct PseudoStyle {
     background: Option<Rgba>,
     gradient: Option<Gradient>,
     line: Option<Rgba>,
-    text: Option<Rgba>,
     shadow: Option<Shadow>,
     opacity: Option<f32>,
     thin: bool,
+    /// A box that covers its region. A small sun, icon or badge pseudo is a
+    /// decoration, not that region's ground.
+    overlay: bool,
 }
 
 /// The `::before`/`::after` channels need the originating element, so insert
@@ -977,12 +1105,14 @@ fn pseudo_value(computed: &ComputedStyle, dark: bool) -> PseudoStyle {
         background: color(computed.background_color(), computed, dark),
         gradient,
         line: line(computed, dark),
-        text: color(computed.color(), computed, dark),
         shadow: shadow(computed, dark),
         opacity: computed
             .value(PropertyId::Opacity)
             .map(|_| computed.opacity()),
         thin,
+        overlay: size_is_full(computed.value(PropertyId::Width))
+            && size_is_full(computed.value(PropertyId::Height))
+            && !pseudo_text(computed),
     }
 }
 
@@ -1142,6 +1272,30 @@ fn line(computed: &ComputedStyle, dark: bool) -> Option<Rgba> {
         }
     }
     found
+}
+
+/// Whether a pseudo-element generates text. A panel label's gradient is not
+/// the panel's ground; a full-size `content: ""` box still is.
+fn pseudo_text(computed: &ComputedStyle) -> bool {
+    match computed.value(PropertyId::Content) {
+        Some(DeclValue::Content(ContentValue::Str(text))) => !text.is_empty(),
+        Some(DeclValue::Content(ContentValue::Seq(parts))) => parts
+            .iter()
+            .any(|part| !matches!(part, ContentPiece::Str(text) if text.is_empty())),
+        _ => false,
+    }
+}
+
+/// Whether a pseudo-element's width or height covers its parent: absent,
+/// `auto`, or a percentage of the whole. A fixed 24 px icon does not.
+fn size_is_full(value: Option<&DeclValue>) -> bool {
+    match value {
+        None | Some(DeclValue::WideKeyword(_)) => true,
+        Some(DeclValue::LenAuto(None)) => true,
+        Some(DeclValue::LenAuto(Some(LengthPercentage::Percent(percent)))) => *percent >= 0.999,
+        Some(DeclValue::Len(LengthPercentage::Percent(percent))) => *percent >= 0.999,
+        _ => false,
+    }
 }
 
 fn length(value: Option<&DeclValue>, computed: &ComputedStyle) -> Option<f32> {

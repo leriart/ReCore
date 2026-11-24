@@ -3,10 +3,12 @@
 //! file of custom properties.
 //!
 //! The loader keeps the theme's files, fonts, pictures and Appearance
-//! metadata; `style-engine` settles the selectors, cascade, inheritance and
-//! custom properties against ReCore's synthetic regions, and `semantic`
-//! maps the computed values to the window. The interpreter reads the
-//! theme's palette, accent, fonts, radius,
+//! metadata. It settles media queries at the window's reference size and
+//! removes `@container style(...)` rules whose condition does not match the
+//! theme's own variables; `style-engine` then settles the selectors,
+//! cascade, inheritance and custom properties against ReCore's synthetic
+//! regions, and `semantic` maps the computed values to the window. The
+//! interpreter reads the theme's palette, accent, fonts, radius,
 //! background picture and ReCord's CRT options into [`ThemeFile`], which the
 //! window turns into its own colours. It also matches the theme's selectors
 //! against ReCore's native regions (sidebar, chat, member list, composer,

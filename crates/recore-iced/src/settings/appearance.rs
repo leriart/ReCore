@@ -134,6 +134,8 @@ pub struct CssEditor {
     /// The file edited; none for a new theme, which is named as saved.
     pub path: Option<PathBuf>,
     pub error: Option<String>,
+    /// Delete was pressed once; the next press deletes the file.
+    pub confirming_delete: bool,
 }
 
 impl CssEditor {
@@ -146,6 +148,7 @@ impl CssEditor {
             draft,
             path,
             error: None,
+            confirming_delete: false,
         }
     }
 
@@ -165,6 +168,7 @@ impl CssEditor {
         source.push('\n');
         self.draft.replace(&source, source.len());
         self.error = None;
+        self.confirming_delete = false;
     }
 }
 
@@ -248,8 +252,16 @@ pub enum Event {
     /// A theme URL typed and imported.
     ThemeUrl(String),
     ThemeImport,
+    /// A local `.theme.css` file copied into ReCore's folder.
+    ThemeImportFile,
     /// The changed options saved as a small CSS file.
     CssExport,
+    /// The whole CSS theme written to a file the person picks.
+    CssExportSource,
+    /// A copy of the edited theme, opened for editing.
+    CssDuplicate,
+    /// Delete the edited CSS theme; the first press asks to confirm.
+    CssDelete,
 }
 
 /// What an Appearance tile is: one ReCore comes with, one the person made,
@@ -305,6 +317,7 @@ impl Settings {
             Event::CssSourceText(text) => {
                 if let Some(editor) = self.css_editor.as_mut() {
                     editor.error = None;
+                    editor.confirming_delete = false;
                     editor.draft.replace(&text, text.len());
                 }
             }
@@ -450,6 +463,10 @@ impl Settings {
                     cx.request(Request::ImportTheme(url));
                 }
             }
+            Event::ThemeImportFile => self.import_css_files(cx),
+            Event::CssExportSource => self.export_css_source(),
+            Event::CssDuplicate => self.duplicate_css_theme(cx),
+            Event::CssDelete => self.delete_css_theme(cx),
             Event::Accent(text) => {
                 self.accent = Some(text.clone());
                 if let Some(accent) = palette::parse(&text) {
@@ -818,6 +835,154 @@ impl Settings {
         }
     }
 
+    /// Copies local `.theme.css` files into ReCore's own folder and shows
+    /// the last one. The picker accepts several files, so a theme pack can
+    /// be brought in at once.
+    fn import_css_files(&mut self, cx: &mut Cx<'_>) {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Discord CSS theme", &["css"])
+            .pick_files()
+        else {
+            return;
+        };
+        let folder = cx.themes.themes_folder().to_path_buf();
+        if let Err(error) = std::fs::create_dir_all(&folder) {
+            self.theme_url_note = Some(format!("Could not make {}: {error}", folder.display()));
+            return;
+        }
+        let mut last = None;
+        let mut failed = 0;
+        for path in paths {
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("imported");
+            let target = unique_css_path(&folder, name);
+            match std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|source| {
+                    std::fs::write(&target, source)
+                        .map_err(|error| error.to_string())
+                        .map(|()| target.clone())
+                }) {
+                Ok(target) => last = Some(target),
+                Err(error) => {
+                    failed += 1;
+                    self.theme_url_note =
+                        Some(format!("Could not import {}: {error}", path.display()));
+                }
+            }
+        }
+        cx.themes.reload();
+        if let Some(target) = last.as_ref()
+            && let Some(id) = css_id_at(&cx.themes, target)
+        {
+            choose(cx, &id);
+        }
+        if failed == 0 {
+            self.theme_url_note = Some(if last.is_some() {
+                "Imported into ReCore's themes folder.".into()
+            } else {
+                "No theme was chosen.".into()
+            });
+        }
+    }
+
+    /// Writes the whole CSS source to a file the person picks, so a theme
+    /// can be shared as one `.theme.css` file.
+    fn export_css_source(&mut self) {
+        let Some(editor) = self.css_editor.as_ref() else {
+            return;
+        };
+        let name = editor.name.clone();
+        let source = editor.source();
+        let file_name = format!("{}.theme.css", safe_name(&name, "theme"));
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSS", &["css"])
+            .set_file_name(file_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.theme_url_note = Some(match std::fs::write(&path, source) {
+            Ok(()) => format!("Saved {name} to {}.", path.display()),
+            Err(error) => format!("Could not save the theme: {error}"),
+        });
+    }
+
+    /// Saves a copy of the edited theme under a new name and opens the copy,
+    /// leaving the original file untouched.
+    fn duplicate_css_theme(&mut self, cx: &mut Cx<'_>) {
+        let Some(editor) = self.css_editor.take() else {
+            return;
+        };
+        let folder = cx.themes.themes_folder().to_path_buf();
+        let name = copy_name(&editor.name);
+        let path = unique_css_path(&folder, &name);
+        let source = renamed_meta(&editor.source(), &name);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            let mut editor = editor;
+            editor.error = Some(format!("Could not make {}: {error}", parent.display()));
+            self.css_editor = Some(editor);
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, source) {
+            let mut editor = editor;
+            editor.error = Some(format!("Could not save {}: {error}", path.display()));
+            self.css_editor = Some(editor);
+            return;
+        }
+        cx.themes.reload();
+        match css_id_at(&cx.themes, &path) {
+            Some(id) => self.edit_css_theme(cx, &id),
+            None => {
+                let mut editor = editor;
+                editor.error = Some(format!(
+                    "Saved {}; Reload CSS will show what could not be read.",
+                    path.display()
+                ));
+                self.css_editor = Some(editor);
+            }
+        }
+    }
+
+    /// Deletes the edited theme's file after a second press.
+    fn delete_css_theme(&mut self, cx: &mut Cx<'_>) {
+        let Some(editor) = self.css_editor.as_mut() else {
+            return;
+        };
+        if !editor.confirming_delete {
+            editor.confirming_delete = true;
+            return;
+        }
+        let Some(editor) = self.css_editor.take() else {
+            return;
+        };
+        let Some(id) = editor.editing.clone() else {
+            self.css_editor = Some(editor);
+            return;
+        };
+        let root = cx.client.root().to_path_buf();
+        let shown = editor
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| editor.name.clone());
+        match cx.themes.delete_css(&root, &id) {
+            Ok(()) => {
+                self.theme_url_note = Some(format!("Deleted {shown}."));
+                cx.request(Request::Changed(Shown::Theme));
+            }
+            Err(error) => {
+                let mut editor = editor;
+                editor.error = Some(error);
+                self.css_editor = Some(editor);
+            }
+        }
+    }
+
     /// Adds a background picture the person picks to the CSS, with its dim
     /// and panel opacity so it shows through rather than only changing a
     /// variable the panels hide.
@@ -1119,6 +1284,13 @@ impl<'a> Page<'a> {
                         "Import",
                         Kind::Plain,
                         Some(theme_message(Event::ThemeImport)),
+                    )
+                    .small(),
+                    action(
+                        theme,
+                        "Import file",
+                        Kind::Plain,
+                        Some(theme_message(Event::ThemeImportFile)),
                     )
                     .small(),
                 ]
@@ -2026,12 +2198,19 @@ impl<'a> Page<'a> {
         .spacing(8)
         .align_y(Alignment::Center);
         if editor.editing.is_some() {
-            heading = heading.push(action(
-                theme,
-                "Open folder",
-                Kind::Plain,
-                Some(theme_message(Event::OpenThemes)),
-            ));
+            heading = heading
+                .push(action(
+                    theme,
+                    "Duplicate",
+                    Kind::Plain,
+                    Some(theme_message(Event::CssDuplicate)),
+                ))
+                .push(action(
+                    theme,
+                    "Open folder",
+                    Kind::Plain,
+                    Some(theme_message(Event::OpenThemes)),
+                ));
         }
         let mut parts = vec![
             form::title(theme, "Appearance"),
@@ -2043,6 +2222,9 @@ impl<'a> Page<'a> {
         ];
         if let Some(error) = &editor.error {
             parts.push(text(error.as_str()).size(13).color(theme.danger).into());
+        }
+        if let Some(note) = self.s.theme_url_note.as_deref() {
+            parts.push(form::note(theme, note));
         }
         parts.push(form::group([
             form::heading(theme, "CSS SOURCE"),
@@ -2087,6 +2269,13 @@ impl<'a> Page<'a> {
                     Some(theme_message(Event::CssTexture(Texture::Vignette))),
                 )
                 .small(),
+                action(
+                    theme,
+                    "Export...",
+                    Kind::Plain,
+                    Some(theme_message(Event::CssExportSource)),
+                )
+                .small(),
             ]
             .spacing(8)
             .into(),
@@ -2095,6 +2284,25 @@ impl<'a> Page<'a> {
                 "Choose background adds --rl-background-image with a dim and panel opacity; the texture buttons add --rl-scanline-opacity, --rl-grain-opacity or --rl-vignette-opacity.",
             ),
         ]));
+        if editor.editing.is_some() {
+            parts.push(form::buttons([action(
+                theme,
+                if editor.confirming_delete {
+                    "Delete this file for good"
+                } else {
+                    "Delete CSS theme"
+                },
+                Kind::Danger,
+                Some(theme_message(Event::CssDelete)),
+            )
+            .small()
+            .icon(
+                self.cx
+                    .look
+                    .icon(Icon::Trash, 16, crate::theme::rgb(theme.on_danger)),
+            )
+            .into()]));
+        }
         form::page(parts)
     }
 
@@ -2261,6 +2469,13 @@ const CSS_TEMPLATE: &str = r#"/**
   --roundness: 0px;
   --font-primary: sans-serif;
 
+  /* With a background picture, fade each section on its own. */
+  --rl-rail-opacity: 1;
+  --rl-sidebar-opacity: 1;
+  --rl-chat-opacity: 1;
+  --rl-members-opacity: 1;
+  --rl-composer-opacity: 1;
+
   /* Textures: scanlines, grain and the vignette */
   --rl-scanline-opacity: 0.08;
   --rl-grain-opacity: 0.03;
@@ -2271,6 +2486,67 @@ body {
   background: var(--background-base);
 }
 "#;
+
+/// The id of the CSS theme read from `path`, if it is still there.
+fn css_id_at(themes: &crate::themes::Themes, path: &Path) -> Option<String> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    themes.css.iter().find_map(|css| {
+        let css_path = css.path.as_ref()?;
+        let css_path = std::fs::canonicalize(css_path).unwrap_or_else(|_| css_path.clone());
+        (css_path == target).then(|| css.id.clone())
+    })
+}
+
+/// `name` as a file name, safe on every platform.
+fn safe_name(name: &str, fallback: &str) -> String {
+    let mut base: String = name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while base.contains("--") {
+        base = base.replace("--", "-");
+    }
+    let base = base.trim_matches('-');
+    if base.is_empty() {
+        fallback.to_owned()
+    } else {
+        base.to_owned()
+    }
+}
+
+/// The source with its `@name` header renamed, or one added when the file
+/// has no header yet.
+fn renamed_meta(source: &str, name: &str) -> String {
+    let mut renamed = String::with_capacity(source.len() + name.len());
+    let mut done = false;
+    for line in source.split_inclusive('\n') {
+        if !done && let Some(at) = line.find("@name") {
+            renamed.push_str(&line[..at]);
+            renamed.push_str("@name ");
+            renamed.push_str(name);
+            if line.ends_with("\r\n") {
+                renamed.push_str("\r\n");
+            } else if line.ends_with('\n') {
+                renamed.push('\n');
+            }
+            done = true;
+            continue;
+        }
+        renamed.push_str(line);
+    }
+    if done {
+        renamed
+    } else {
+        format!("/**\n * @name {name}\n */\n{source}")
+    }
+}
 
 /// A path the CSS can name, with the separators CSS URLs use.
 fn css_url(path: &Path) -> String {
@@ -2543,7 +2819,17 @@ impl<'a> Page<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssEditor, preserve_alpha, unique_css_path};
+    use super::{CssEditor, preserve_alpha, renamed_meta, safe_name, unique_css_path};
+
+    #[test]
+    fn a_duplicate_renames_its_header_and_keeps_the_rest() {
+        let source = "/**\n * @name One\n * @author Someone\n */\n:root { --x: 1; }";
+        let renamed = renamed_meta(source, "One copy");
+        assert!(renamed.contains("@name One copy"), "{renamed}");
+        assert!(renamed.contains("@author Someone"), "{renamed}");
+        assert!(renamed.contains("--x: 1"), "{renamed}");
+        assert_eq!(safe_name("../My theme", "theme"), "My-theme");
+    }
 
     #[test]
     fn the_hsv_picker_keeps_an_existing_alpha() {

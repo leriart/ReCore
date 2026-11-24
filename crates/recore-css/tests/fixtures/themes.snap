@@ -1,0 +1,14 @@
+=== Ambxst.theme.css
+css:ambxst | Ambxst | true | #1a1111 | #231919 | #1a1111 | #f1dedd | #ffb3ae | Some(16.0) | Some("Roboto Condensed") | 759 | 0
+=== Catppuccin Mocha.theme.css
+css:catppuccin-mocha | Catppuccin Mocha | true | #1e1e2e | #181825 | #11111b | #cdd6f4 | #cba6f7 | Some(12.0) | Some("Inter") | 104 | 0
+=== Gruvbox Ember.theme.css
+css:gruvbox-ember | Gruvbox Ember | true | #282828 | #1d2021 | #1d2021 | #ebdbb2 | #fe8019 | Some(4.0) | Some("Iosevka") | 104 | 0
+=== Nord Aurora.theme.css
+css:nord-aurora | Nord Aurora | true | #2e3440 | #3b4252 | #292f3a | #d8dee9 | #a3be8c | Some(10.0) | Some("Inter") | 100 | 0
+=== ReCord.theme.css
+css:record | ReCord | true | #080907 | #0e100c | #080907 | #e4cdb1 | #e94221 | Some(0.0) | Some("Pixel Operator") | 574 | 4
+=== Solarized Paper.theme.css
+css:solarized-paper | Solarized Paper | false | #fdf6e3 | #eee8d5 | #e9e2cd | #586e75 | #2aa198 | Some(2.0) | Some("Iosevka") | 103 | 0
+=== Tokyo Night.theme.css
+css:tokyo-night | Tokyo Night | true | #1a1b26 | #16161e | #15161e | #c0caf5 | #7aa2f7 | Some(8.0) | Some("Inter") | 100 | 0

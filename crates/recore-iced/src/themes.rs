@@ -142,6 +142,8 @@ pub struct Themes {
     pub problems: Vec<recore_css::Problem>,
     /// Where ReCore looked for CSS themes.
     pub folders: Vec<PathBuf>,
+    /// The data folder, for keeping a choice that followed a renamed file.
+    root: PathBuf,
     pub chosen: Option<String>,
     /// ReCore's accent, over its theme's own signal orange.
     pub accent: Option<Colour>,
@@ -183,6 +185,7 @@ impl Themes {
             css: Vec::new(),
             problems: Vec::new(),
             folders,
+            root: root.to_path_buf(),
             chosen: layout.theme.clone(),
             accent,
             effects,
@@ -214,6 +217,12 @@ impl Themes {
     }
 
     fn reload_with(&mut self, remote_all: bool) {
+        // A theme's id comes from its name; editing that name must not drop
+        // the choice or the options kept for the same file.
+        let previous = self
+            .chosen_css()
+            .and_then(|css| css.path.as_deref())
+            .map(canonical);
         let scan = if remote_all {
             let mut fetched: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
             recore_css::scan_with_imports(&self.folders, &mut |url| {
@@ -228,6 +237,28 @@ impl Themes {
         self.css = scan.themes;
         self.problems = scan.problems;
         self.fingerprint = recore_css::theme_files_fingerprint(&self.folders);
+        if let Some(previous) = previous
+            && let Some(new_id) = self
+                .css
+                .iter()
+                .find(|css| {
+                    css.path
+                        .as_deref()
+                        .is_some_and(|path| canonical(path) == previous)
+                })
+                .map(|css| css.id.clone())
+            && self.chosen.as_deref() != Some(new_id.as_str())
+        {
+            let old_id = self.chosen.replace(new_id.clone());
+            layout::store(&self.root, "theme", &new_id);
+            if let Some(old_id) = old_id
+                && old_id != new_id
+                && let Some(changed) = self.overrides.remove(&old_id)
+            {
+                self.overrides.insert(new_id, changed);
+                layout::store(&self.root, "css_options", &self.overrides);
+            }
+        }
         self.apply_overrides();
         if !remote_all {
             let chosen = self.chosen_id().to_owned();
@@ -370,6 +401,30 @@ impl Themes {
         self.reload_one(id);
         let chosen = self.chosen_id().to_owned();
         self.apply_font(&chosen);
+    }
+
+    /// Deletes a CSS theme's file, forgets the options kept for it, and
+    /// shows ReCore when it was the chosen one.
+    pub fn delete_css(&mut self, root: &Path, id: &str) -> Result<(), String> {
+        let index = self
+            .css
+            .iter()
+            .position(|css| css.id == id)
+            .ok_or_else(|| "the theme is no longer there".to_owned())?;
+        let path = self.css[index]
+            .path
+            .clone()
+            .ok_or_else(|| "the theme has no file to delete".to_owned())?;
+        fs::remove_file(&path)
+            .map_err(|error| format!("could not delete {}: {error}", path.display()))?;
+        self.overrides.remove(id);
+        layout::store(root, "css_options", &self.overrides);
+        if self.chosen.as_deref() == Some(id) || self.chosen_id() == id {
+            self.chosen = Some(DEFAULT.to_owned());
+            layout::store(root, "theme", DEFAULT);
+        }
+        self.reload_local();
+        Ok(())
     }
 
     /// Re-reads one CSS theme with its changed options.
@@ -1597,6 +1652,12 @@ fn core_colour(colour: recore_css::Rgba) -> Colour {
     )
 }
 
+/// The path's real identity, so a theme moved between client folders is
+/// still the same theme after a reload.
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Opens a folder in the desktop's file manager, for Appearance's button.
 pub fn open_folder(path: &Path) {
     #[cfg(target_os = "linux")]
@@ -1636,6 +1697,35 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_css_theme_keeps_its_choice_and_options() {
+        let folder = tempfile::tempdir().unwrap();
+        let themes = folder.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(
+            themes.join("one.theme.css"),
+            "/** @name One */ :root { --background-primary: #101010; }",
+        )
+        .unwrap();
+        std::fs::write(
+            folder.path().join(LAYOUT),
+            r#"{"theme": "css:one", "css_options": {"css:one": {"--x": "1"}}}"#,
+        )
+        .unwrap();
+        let mut loaded = Themes::read(folder.path(), &Layout::read(folder.path()));
+        assert_eq!(loaded.chosen_id(), "css:one");
+        assert!(loaded.overrides.contains_key("css:one"));
+        std::fs::write(
+            themes.join("one.theme.css"),
+            "/** @name Two */ :root { --background-primary: #101010; }",
+        )
+        .unwrap();
+        loaded.reload_local();
+        assert_eq!(loaded.chosen_id(), "css:two");
+        assert!(loaded.overrides.contains_key("css:two"));
+        assert!(!loaded.overrides.contains_key("css:one"));
+    }
+
+    #[test]
     fn choosing_a_theme_keeps_the_rest_of_the_layout() {
         let folder = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1667,6 +1757,7 @@ mod tests {
             css: Vec::new(),
             problems: Vec::new(),
             folders: Vec::new(),
+            root: PathBuf::new(),
             chosen: Some("recore".into()),
             accent: None,
             effects: true,
@@ -1689,6 +1780,7 @@ mod tests {
                 css: Vec::new(),
                 problems: Vec::new(),
                 folders: Vec::new(),
+                root: PathBuf::new(),
                 chosen: None,
                 accent: None,
                 effects: true,

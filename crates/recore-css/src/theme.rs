@@ -4,9 +4,10 @@
 //! `html`, `.theme-dark`, `.theme-light`), usually Discord's own tokens
 //! (`--background-primary`, `--text-normal`, `--brand-experiment`), plus the
 //! theme's own variables. [`load`] follows them through `var()` and
-//! `color-mix()`, picks the dark or light set for the client's appearance,
-//! and maps them onto ReCore's [`Palette`]. ReCord's `--rl-*` palette is read
-//! as well, so ReCord's own CSS theme gives the same colours as the built-in
+//! `color-mix()`, settles `@layer`, `@media` and `@container style(...)`
+//! conditions, picks the dark or light set for the client's appearance, and
+//! maps them onto ReCore's [`Palette`]. ReCord's `--rl-*` palette is read as
+//! well, so ReCord's own CSS theme gives the same colours as the built-in
 //! theme.
 //!
 //! What CSS cannot carry into a native window is styling for Discord's DOM:
@@ -598,67 +599,40 @@ pub fn load_str_with_imports(
             }
         }
     }
+    let mut sheet = sheet;
+    let has_containers = sheet.rules.iter().any(|rule| !rule.containers.is_empty());
+    // A container query must not decide the palette before its own
+    // condition is settled; the rules outside one are the base it reads.
+    let appearance = if has_containers {
+        collect_where(&sheet, |rule| rule.containers.is_empty())
+    } else {
+        collect(&sheet)
+    };
+    // The first pass only settles which containers apply; Ryoku's light
+    // template keeps its ground inside `@container style(--light-mode: on)`,
+    // so the appearance must be chosen again once those rules are in.
+    let provisional = if has_containers {
+        choose_dark(&appearance, options.mode, &mut Vec::new())
+    } else {
+        choose_dark(&appearance, options.mode, &mut warnings)
+    };
+    if has_containers {
+        let base = settle_vars(&sheet, &appearance, provisional, options);
+        sheet.rules.retain(|rule| {
+            rule.containers
+                .iter()
+                .all(|condition| css::container_applies(condition, &base))
+        });
+    }
     let collected = collect(&sheet);
-    let dark = choose_dark(&collected, options.mode, &mut warnings);
-    let mut vars = collected.vars(dark);
-    direct_vars(&sheet, &mut vars, dark);
-    if let Some(accent) = options.accent {
-        let hex = accent.hex();
-        for name in [
-            "--rl-accent",
-            "--rl-signal",
-            "--brand-experiment",
-            "--brand-500",
-            "--brand-360",
-            "--control-primary-background-default",
-        ] {
-            vars.insert(&css::Declaration {
-                name: name.into(),
-                value: hex.clone(),
-                important: true,
-            });
-        }
-        let tint = vars
-            .first_color(&["--rl-tint"], !dark)
-            .unwrap_or(accent.ink())
-            .hex();
-        for (name, value) in [
-            (
-                "--rl-signal-hot",
-                format!("color-mix(in srgb, {hex} 80%, {tint})"),
-            ),
-            (
-                "--rl-signal-soft",
-                format!("color-mix(in srgb, {hex} 58%, {tint})"),
-            ),
-        ] {
-            vars.insert(&css::Declaration {
-                name: name.into(),
-                value,
-                important: true,
-            });
-        }
-    }
-    for (name, value) in &options.overrides {
-        vars.insert(&css::Declaration {
-            name: name.clone(),
-            value: value.clone(),
-            important: true,
-        });
-    }
-    if vars.contains("--rl-accent") && !vars.contains("--rl-signal") {
-        let value = vars
-            .get("--rl-accent")
-            .map(str::to_owned)
-            .unwrap_or_else(|| "var(--rl-accent)".into());
-        vars.insert(&css::Declaration {
-            name: "--rl-signal".into(),
-            value,
-            important: false,
-        });
-    }
+    let dark = if has_containers {
+        choose_dark(&collected, options.mode, &mut warnings)
+    } else {
+        provisional
+    };
+    let vars = settle_vars(&sheet, &collected, dark, options);
     let semantic = crate::semantic::compute(&sheet, &vars, dark);
-    let (palette, native, page_layout, page_gap) = match semantic {
+    let (palette, mut native, page_layout, page_gap) = match semantic {
         Some(computed) => (
             computed.palette,
             computed.native,
@@ -674,6 +648,7 @@ pub fn load_str_with_imports(
             None,
         ),
     };
+    region_opacities(&mut native, &vars);
     let animations = animations(&sheet, &collected, dark, &vars);
     let direct_background = direct_background(&sheet, &vars, directory, dark);
     let paint = options
@@ -885,9 +860,18 @@ struct Entry {
 }
 
 fn collect(sheet: &Stylesheet) -> Collected {
+    collect_where(sheet, |_| true)
+}
+
+/// [`collect`] over the rules `allow` names, so a `@container style(...)`
+/// that does not match the theme's root values cannot set the palette.
+fn collect_where(sheet: &Stylesheet, allow: impl Fn(&css::Rule) -> bool) -> Collected {
     let mut collected = Collected::default();
     let mut order = 0usize;
     for rule in &sheet.rules {
+        if !allow(rule) {
+            continue;
+        }
         for selector in &rule.selectors {
             let Some((selector_dark, specificity)) =
                 css::root_selector_with_specificity(selector, true)
@@ -969,9 +953,19 @@ impl Collected {
     }
 
     /// The appearance the theme asks for: an explicit `color-scheme`, then
-    /// the ground it paints. The base declarations are read as light first,
-    /// then the dark set, then the light set.
+    /// the ground it paints. The dark and light blocks are read before the
+    /// unscoped base, because a base ground is what a dark block overrides;
+    /// reading the base first made a dark theme that starts from Discord's
+    /// light defaults look light.
     fn appearance(&self) -> Option<bool> {
+        let dark_vars = self.vars_with(true);
+        if let Some(dark) = appearance_of(&dark_vars, false) {
+            return Some(dark);
+        }
+        let light_vars = self.vars_with(false);
+        if let Some(dark) = appearance_of(&light_vars, true) {
+            return Some(dark);
+        }
         let mut vars = css::Vars::default();
         for entry in &self.entries {
             if entry.dark.is_none() {
@@ -983,15 +977,7 @@ impl Collected {
                 );
             }
         }
-        if let Some(dark) = appearance_of(&vars, true) {
-            return Some(dark);
-        }
-        let dark_vars = self.vars_with(true);
-        if let Some(dark) = appearance_of(&dark_vars, false) {
-            return Some(dark);
-        }
-        let light_vars = self.vars_with(false);
-        appearance_of(&light_vars, true)
+        appearance_of(&vars, true)
     }
 }
 
@@ -1032,13 +1018,9 @@ fn choose_dark(collected: &Collected, mode: Mode, warnings: &mut Vec<String>) ->
             if let Some(dark) = collected.appearance() {
                 return dark;
             }
-            let has_light = collected
-                .entries
-                .iter()
-                .any(|entry| entry.dark == Some(false));
-            if has_light {
-                return false;
-            }
+            // A missing ground means Discord's dark default. A `.theme-light`
+            // block alone is not a declaration that the whole theme is light:
+            // most dark themes carry one for Discord's light mode.
             warnings.push(
                 "the theme names no background; read as a dark theme. Choose Light in Appearance if it is a light one."
                     .into(),
@@ -1325,6 +1307,87 @@ fn matching_paren(text: &str, open: usize) -> Option<usize> {
 /// the same synthetic variables the palette reads, so a theme that writes
 /// `body { background: #111; color: #eee; }` gets the right ground and text
 /// even when it never names `--background-primary` or `--text-normal`.
+/// The root custom properties a theme settles to: its cascade, the colours
+/// its page rules paint directly, the initial values `@property` declares,
+/// the accent and the options the person changed.
+fn settle_vars(
+    sheet: &Stylesheet,
+    collected: &Collected,
+    dark: bool,
+    options: &Options,
+) -> css::Vars {
+    let mut vars = collected.vars(dark);
+    direct_vars(sheet, &mut vars, dark);
+    for (name, spec) in &sheet.properties {
+        if vars.contains(name) {
+            continue;
+        }
+        if let Some(initial) = &spec.initial {
+            vars.insert(&css::Declaration {
+                name: name.clone(),
+                value: initial.clone(),
+                important: false,
+            });
+        }
+    }
+    if let Some(accent) = options.accent {
+        let hex = accent.hex();
+        for name in [
+            "--rl-accent",
+            "--rl-signal",
+            "--brand-experiment",
+            "--brand-500",
+            "--brand-360",
+            "--control-primary-background-default",
+        ] {
+            vars.insert(&css::Declaration {
+                name: name.into(),
+                value: hex.clone(),
+                important: true,
+            });
+        }
+        let tint = vars
+            .first_color(&["--rl-tint"], !dark)
+            .unwrap_or(accent.ink())
+            .hex();
+        for (name, value) in [
+            (
+                "--rl-signal-hot",
+                format!("color-mix(in srgb, {hex} 80%, {tint})"),
+            ),
+            (
+                "--rl-signal-soft",
+                format!("color-mix(in srgb, {hex} 58%, {tint})"),
+            ),
+        ] {
+            vars.insert(&css::Declaration {
+                name: name.into(),
+                value,
+                important: true,
+            });
+        }
+    }
+    for (name, value) in &options.overrides {
+        vars.insert(&css::Declaration {
+            name: name.clone(),
+            value: value.clone(),
+            important: true,
+        });
+    }
+    if vars.contains("--rl-accent") && !vars.contains("--rl-signal") {
+        let value = vars
+            .get("--rl-accent")
+            .map(str::to_owned)
+            .unwrap_or_else(|| "var(--rl-accent)".into());
+        vars.insert(&css::Declaration {
+            name: "--rl-signal".into(),
+            value,
+            important: false,
+        });
+    }
+    vars
+}
+
 fn direct_vars(sheet: &Stylesheet, vars: &mut css::Vars, dark: bool) {
     let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
     for rule in &sheet.rules {
@@ -1482,6 +1545,7 @@ pub fn palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
         &[
             "--text-normal",
             "--text-default",
+            "--normal-text",
             "--header-primary",
             "--textbrightest",
         ],
@@ -1498,6 +1562,7 @@ pub fn palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
             "--background-brand",
             "--blurple-50",
             "--accentcolor",
+            "--main-color",
         ],
         light,
         &["--brand-360", "--text-brand", "--accentcolor2"],
@@ -1644,6 +1709,7 @@ pub fn palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
         &[
             "--header-secondary",
             "--text-secondary",
+            "--muted-text",
             "--text-muted",
             "--interactive-normal",
         ],
@@ -1654,6 +1720,7 @@ pub fn palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
     let muted = pick(
         vars,
         &[
+            "--muted-text",
             "--text-muted",
             "--text-faint",
             "--interactive-normal",
@@ -1667,6 +1734,7 @@ pub fn palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
         vars,
         &[
             "--text-subtle",
+            "--muted-text",
             "--text-faint",
             "--interactive-muted",
             "--channel-icon",
@@ -1990,6 +2058,31 @@ fn record_palette<V: Variables + ?Sized>(vars: &V, dark: bool) -> Palette {
 #[allow(
     clippy::too_many_arguments,
     reason = "the look is assembled from the palette, pictures, fonts and animation in one place"
+)]
+/// The per-section opacities a theme names, so a wallpaper can show through
+/// one region more than another as the native theme packs allow. A selector
+/// that already set a region's `opacity` wins over the root variable.
+fn region_opacities(native: &mut crate::NativeStyle, vars: &css::Vars) {
+    for (names, slot) in [
+        (&["--rl-rail-opacity"][..], &mut native.rail_opacity),
+        (&["--rl-sidebar-opacity"][..], &mut native.sidebar_opacity),
+        (&["--rl-chat-opacity"][..], &mut native.chat_opacity),
+        (&["--rl-members-opacity"][..], &mut native.panel_opacity),
+        (&["--rl-composer-opacity"][..], &mut native.field_opacity),
+        (&["--rl-raised-opacity"][..], &mut native.raised_opacity),
+        (&["--rl-tooltip-opacity"][..], &mut native.tooltip_opacity),
+    ] {
+        if slot.is_none()
+            && let Some(value) = fraction(vars, names)
+        {
+            *slot = Some(value);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the parsed theme's separate parts are gathered here once"
 )]
 fn look(
     vars: &css::Vars,
@@ -3485,6 +3578,23 @@ html.theme-light:not([data-rl-mode="dark"]) {
     }
 
     #[test]
+    fn a_theme_can_fade_each_section_differently() {
+        let theme = load_str(
+            ":root { --rl-rail-opacity: 40%; --rl-sidebar-opacity: 0.6; \
+             --rl-chat-opacity: 80; --rl-members-opacity: 0.9; \
+             --rl-composer-opacity: 1; }",
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .unwrap();
+        assert_eq!(theme.native.rail_opacity, Some(0.4));
+        assert_eq!(theme.native.sidebar_opacity, Some(0.6));
+        assert_eq!(theme.native.chat_opacity, Some(0.8));
+        assert_eq!(theme.native.panel_opacity, Some(0.9));
+        assert_eq!(theme.native.field_opacity, Some(1.0));
+    }
+
+    #[test]
     fn a_theme_can_keep_a_panel_opacity() {
         let theme = load_str(
             ":root { --background-image: linear-gradient(#000, #fff); --rl-panel-opacity: 72%; --background-size: contain; }",
@@ -3553,6 +3663,112 @@ html.theme-light:not([data-rl-mode="dark"]) {
         )
         .unwrap();
         assert_eq!(theme.native.category_size, Some(30.0));
+    }
+
+    #[test]
+    fn a_theme_with_both_oldcord_class_blocks_reads_as_dark() {
+        let theme = load_str(
+            r#"
+            html:not(.custom).theme-dark:not(.theme-darker, .theme-midnight) {
+                --background-primary: #36393f;
+                --text-normal: #ffffff;
+            }
+            html:not(.custom).theme-light {
+                --background-primary: #f0f1f5 !important;
+                --text-normal: #535461 !important;
+            }
+            "#,
+            None,
+            &Options::default(),
+        )
+        .unwrap();
+        assert!(theme.palette.dark);
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x36, 0x39, 0x3f));
+        assert_eq!(theme.palette.text, Rgba::rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn clearvision_names_its_ink_and_accent_with_its_own_variables() {
+        let theme = load_str(
+            r#"
+            :root { --main-color: #2780e6; --normal-text: #dcdcde; }
+            .theme-dark {
+                --text-default: hsl(from var(--normal-text) h calc(1 * s) l/alpha);
+            }
+            "#,
+            None,
+            &Options::default(),
+        )
+        .unwrap();
+        assert!(theme.palette.dark);
+        assert_eq!(theme.palette.accent, Rgba::rgb(0x27, 0x80, 0xe6));
+        assert_eq!(theme.palette.text, Rgba::rgb(0xdc, 0xdc, 0xde));
+    }
+
+    #[test]
+    fn a_container_style_query_can_choose_the_light_palette() {
+        let theme = load_str(
+            r#"
+            @property --light-mode {
+                syntax: "<custom-ident>";
+                inherits: true;
+                initial-value: off;
+            }
+            :root { --paper: #eee; --ink: #222; }
+            body { --light-mode: on; }
+            @container body style(--light-mode: on) {
+                :root {
+                    --background-primary: var(--paper);
+                    --text-normal: var(--ink);
+                }
+            }
+            "#,
+            None,
+            &Options::default(),
+        )
+        .unwrap();
+        assert!(!theme.palette.dark);
+        assert_eq!(theme.palette.chat, Rgba::rgb(0xee, 0xee, 0xee));
+        assert_eq!(theme.palette.text, Rgba::rgb(0x22, 0x22, 0x22));
+    }
+
+    #[test]
+    fn a_container_style_query_follows_the_property_it_names() {
+        let css = r#"
+            :root { --mode: off; --background-primary: #101010; }
+            @container style(--mode: on) {
+                :root { --background-primary: #ffffff; }
+            }
+            @container not style(--mode: on) {
+                :root { --text-normal: #eeeeee; }
+            }
+        "#;
+        let off = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(off.palette.chat, Rgba::rgb(0x10, 0x10, 0x10));
+        assert_eq!(off.palette.text, Rgba::rgb(0xee, 0xee, 0xee));
+        let mut options = Options::with_mode(Mode::Dark);
+        options.overrides.push(("--mode".into(), "on".into()));
+        let on = load_str(css, None, &options).unwrap();
+        assert_eq!(on.palette.chat, Rgba::rgb(0xff, 0xff, 0xff));
+        assert_ne!(on.palette.text, Rgba::rgb(0xee, 0xee, 0xee));
+    }
+
+    #[test]
+    fn a_property_initial_value_fills_a_missing_variable() {
+        let theme = load_str(
+            r#"
+            @property --brand {
+                syntax: "<color>";
+                inherits: true;
+                initial-value: #123456;
+            }
+            :root { --background-primary: var(--brand); }
+            "#,
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x12, 0x34, 0x56));
     }
 
     #[test]

@@ -114,12 +114,17 @@ folder; ReCore also looks there:
 subfolders, leaves hidden folders and dependency trees alone, and reads the
 same theme once when it is copied into several client folders. While
 Settings is open, a theme saved by an editor outside ReCore reloads itself.
-The **Theme URL** field downloads a theme into ReCore's folder, and the tile
+The **Theme URL** field downloads a theme into ReCore's folder, and
+**Import file** copies one or more local `.theme.css` files there; the tile
 turns up ready to choose. **New CSS theme** opens a starter file in
 ReCore's own editor, and the pencil on any CSS tile opens that theme's file
 whole: its colours, imports, fonts, background pictures, gradients, shapes
 and textures are editable as CSS, and **Save CSS** writes it back and shows
-it at once. Escape or **Back to themes** leaves the editor without writing.
+it at once. **Duplicate** saves a renamed copy and opens it, **Export...**
+writes the whole source to a file, and **Delete CSS theme** removes the file
+after a second press. Escape or **Back to themes** leaves the editor without
+writing. A theme keeps its choice and its changed options when its `@name`
+changes; ReCore follows the file, not the old id.
 The editor's **Choose background...** adds `--rl-background-image` with a
 dim and panel opacity, and its texture buttons add ReCord's scanlines,
 grain or vignette. Each theme appears as a tile with the CSS badge. A
@@ -139,30 +144,55 @@ theme carries:
   `--status-positive`, `--text-link`, the border, interactive and input tokens,
   and the newer `--background-base-*`, `--background-surface-*`,
   `--control-*`, `--text-default` names wherever it uses those instead.
+  ClearVision/DiscordRecolor's `--main-color`, `--normal-text` and
+  `--muted-text` are read as the accent and ink too.
 - Its own variable chain: `var()`, fallbacks, `!important`, `@import` between
-  local files, `@media (prefers-color-scheme: dark|light)`, `.theme-dark`
-  and `.theme-light` blocks, `color-mix()` (two or more colours, with
-  `in srgb` or `in srgb-linear`), `light-dark()`, `hwb()`, `oklab()` and
-  `oklch()`, `lab()`, `lch()` and `color(srgb ...)`/`color(display-p3 ...)`.
-  Hex, `rgb()`, `rgba()`, `hsl()`, `hsla()` and named colours are read, and
-  DiscordRecolor's bare `30,30,30` RGB triples are understood as colours.
+  local files, `@media`, `.theme-dark` and `.theme-light` blocks,
+  `color-mix()` (two or more colours, in sRGB, linear light, Lab, LCh,
+  OKLab or OKLCh), `light-dark()`, `hwb()`, `oklab()` and `oklch()`, `lab()`,
+  `lch()` and `color(srgb ...)`/`color(display-p3 ...)`. Hex, `rgb()`,
+  `rgba()`, `hsl()`, `hsla()`, `contrast-color()` and named colours are read,
+  and DiscordRecolor's bare `30,30,30` RGB triples are understood as colours.
+  The relative forms (`rgb(from ...)`, `hsl(from ...)`, `oklab(from ...)`,
+  `oklch(from ...)`, `lab(from ...)`, `lch(from ...)`, `hwb(from ...)` and
+  `color(from ...)`) keep or replace their source channels, including
+  `calc(1 * s)` and the other channel keywords inside `calc()`. CSS nesting
+  (`&:hover`, `&::after`, a nested `@media` or `@container`) is flattened
+  before the cascade, so the nested rules keep their parent's selector.
   The cascade keeps specificity, source order, `!important` and `@layer`
   order across the root, theme-class and media-query blocks, so a later
   `:root` declaration can win over an earlier `.theme-dark` one, as in a
-  browser. `@supports` conditions and the media/supports condition after an
-  `@import` are applied, and a feature the native window cannot paint — a
-  `backdrop-filter`, a mask, a container query or a view transition — takes
-  its `not (...)` branch instead. `@property` gives a variable its syntax
-  and initial value.
-  An `http:` or `https:` `@import` is downloaded, with its own relative
-  imports; so are a remote font in `@font-face` and a remote picture in
-  `--background-image`. Downloads are kept for ten minutes in memory and on
-  disk, so a theme works offline after its first load; **Reload CSS**
-  forgets them, so a changed base theme is read at once. A file over 8 MB, a
-  failed download or an offline machine keeps the rest of the theme and says
-  so in Appearance's note. A theme's remote imports are fetched when the
-  theme is chosen, so a folder full of remote themes does not stall the
-  first frame.
+  browser. A `@layer reset, base, theme;` statement fixes the layer order
+  before its blocks, and `@import "x.css" layer(theme) screen` puts the
+  import in a layer and applies its media condition. `@supports` conditions
+  and the media/supports/layer conditions after an `@import` are applied,
+  and a feature the native window cannot paint — a `backdrop-filter`, a
+  mask, a container type or a view transition — takes its `not (...)` branch
+  instead. `@property` gives a variable its syntax and initial value, which
+  fills the variable when the theme does not set it.
+- Media queries are settled at the window's 1280 × 720 reference size:
+  `prefers-color-scheme`, `prefers-reduced-motion`, `hover`, `pointer`,
+  `orientation`, `width`/`height` with `min-`/`max-` or range syntax,
+  `aspect-ratio`, `resolution`, `color-gamut` and the other desktop
+  features. A query whose feature the native window cannot know stays
+  applicable, rather than silently dropping a theme's rules.
+- `@container style(--motion: off)` and its `not style(...)` form read the
+  theme's own settled custom properties, so ReCord's motion, icon and
+  low-power containers take the branch matching Appearance's values. A
+  container can also carry the theme's whole ground: Ryoku's light template
+  sets `--light-mode: on` and puts its palette in
+  `@container body style(--light-mode: on)`, which ReCore uses to choose the
+  light appearance. A container size query uses the same reference window;
+  names, `scroll-state()` and unknown conditions stay applicable.
+- Remote files: an `http:` or `https:` `@import` is downloaded, with its own
+  relative imports; so are a remote font in `@font-face` and a remote
+  picture in `--background-image`. Downloads are kept for ten minutes in
+  memory and on disk, so a theme works offline after its first load;
+  **Reload CSS** forgets them, so a changed base theme is read at once. A
+  file over 8 MB, a failed download or an offline machine keeps the rest of
+  the theme and says so in Appearance's note. A theme's remote imports are
+  fetched when the theme is chosen, so a folder full of remote themes does
+  not stall the first frame.
 - Its fonts: `@font-face` with a `data:` URI, a file beside the theme or a
   remote URL is loaded into the window's font system, and `--font-primary`
   picks the family.
@@ -170,7 +200,11 @@ theme carries:
   CSS gradient or video (`--rl-background-image`, `--background-image`, or a
   `body` / `body::before` background rule) drawn under the panels, its fit
   (`--rl-background-size`: `cover`, `contain` or `100% 100%`), how opaque the
-  panels are over it (`--rl-panel-opacity` or `--rl-surface`), and ReCord's
+  panels are over it (`--rl-panel-opacity` or `--rl-surface`), per-section
+  opacities (`--rl-rail-opacity`, `--rl-sidebar-opacity`,
+  `--rl-chat-opacity`, `--rl-members-opacity`,
+  `--rl-composer-opacity`, `--rl-raised-opacity`,
+  `--rl-tooltip-opacity`), and ReCord's
   CRT options
   (`--rl-motion`, `--rl-icons`, `--rl-scanline-opacity`,
   `--rl-grain-opacity`, `--rl-vignette-opacity`, `--rl-flicker-duration`,
@@ -260,11 +294,17 @@ same regions as `[class*="modal_"]`, `[class*="menu_"]` and
 `[class*="tooltip_"]`.
 
 ReCore understands class, id, tag and attribute selectors, attribute
-fragments such as `[class*="..."]`, descendant selectors, `:is()`, `:not()`,
-`:where()`, `:has()` relative selectors, the `.theme-dark`/`.theme-light`
-roots and `:hover`/`:focus` states. Inheritance, specificity, `!important` and
-source order are applied, and `var()` values are resolved before they reach
-the window. A bare tag selector or `*` never styles a region on its own: it
+fragments such as `[class*="..."]`, descendant, child and sibling
+combinators, `:is()`, `:not()`, `:where()`, `:has()` relative selectors,
+`:first-child`, `:last-child`, `:only-child`, `:nth-child()` (and their
+`-of-type` and `-last-` forms), the `.theme-dark`/`.theme-light` roots and
+`:hover`/`:focus` states. A generated Discord class such as `chat_z_gUBg`
+or `chat-2ZfjoI` is matched by its stable `chat_` stem, since Discord
+changes the hash and separator between builds. Structural selectors are
+settled against the synthetic region tree, so they describe its rows and
+panels, not Discord's full virtualized DOM. Inheritance, specificity,
+`!important` and source order are applied, and `var()` values are resolved
+before they reach the window. A bare tag selector or `*` never styles a region on its own: it
 needs a class, an id or an attribute, so a theme's `div { ... }` reset cannot
 paint the rail.
 Fully transparent backgrounds are left to the region's own colour instead of
@@ -306,11 +346,13 @@ A native window has no generated box for a pseudo-element, but a few of them
 name something ReCore already paints:
 
 - A region's `::before` or `::after` is a decoration on that region. A full
-  overlay's background becomes the region's ground; a box whose `height` or
-  `width` is at most 3 px becomes one of the window's lines; its border colour
-  and `box-shadow` are kept, and its own `opacity` fades what it paints.
-  `body::before` and `body::after` stay the background picture and texture
-  paths described above, not a region.
+  overlay's background becomes the region's ground only when it covers the
+  region (auto/100% width and height and no generated text); a fixed-size
+  sun, icon or panel label does not recolour the panel. A box whose `height`
+  or `width` is at most 3 px becomes one of the window's lines; its border
+  colour and `box-shadow` are kept, and its own `opacity` fades what it
+  paints. `body::before` and `body::after` stay the background picture and
+  texture paths described above, not a region.
 - `::selection`'s `background` is the colour text is selected in, in the
   timeline and every field.
 - `::placeholder`'s `color` is a field's hint text.
@@ -336,9 +378,10 @@ filters. `letter-spacing` is read into the
 theme's look, but iced's text widget has no tracking setting, so it is not
 painted; a root `font-size` is read the same way while every native widget
 keeps its own size. `text-transform` outside the three headings, masks and
-generated content, `:nth-child` and sibling structure, and `@media` queries
-other than dark and light are kept in the file without being painted. A
-root/body animation of the ground is the exception: its colour and opacity
+generated content are kept in the file without being painted. Structural
+and sibling selectors reach the synthetic region tree, whose rows are
+representative rather than the full virtualized message and member lists.
+A root/body animation of the ground is the exception: its colour and opacity
 keyframes become a quiet native wash, and a gradient background is painted at
 the background size.
 ReCord's scanlines, grain, vignette and corner frame are drawn natively over
@@ -457,7 +500,11 @@ the common clients' folders. `Options` chooses the dark or light set, forces
 an accent, or overrides a custom property.
 
 The reader keeps its own tolerant loader for files, fonts, pictures and the
-comments Appearance turns into controls. The semantic pass in
+comments Appearance turns into controls. It flattens nested rules, settles
+media queries and `@layer` order while reading; once the root variables are
+known it removes the `@container style(...)` rules whose condition does not
+match before the semantic pass sees them. Generated Discord class names are
+reduced to their stable stems before the engine matches a region. The semantic pass in
 `crates/recore-css/src/semantic.rs` then hands the settled rules to
 [`style-engine`](https://crates.io/crates/style-engine): its CSS parser,
 selector matcher and cascade settle inheritance, custom properties, `:is()`,

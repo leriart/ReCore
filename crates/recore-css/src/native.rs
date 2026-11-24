@@ -17,7 +17,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 use crate::{
     Rgba,
     color::{self, parse as parse_color},
-    css::{Declaration, Rule, Vars, selector_compounds},
+    css::{Declaration, Rule, Vars},
 };
 
 /// How a region's text is transformed, as CSS's `text-transform`.
@@ -124,6 +124,10 @@ pub(crate) const NODES: [Node; 25] = [
             "app_",
             "appMount",
             "appMount_",
+            "bg",
+            "bg_",
+            "layers",
+            "layers_",
             "theme-dark",
             "theme-light",
         ],
@@ -904,13 +908,6 @@ fn apply_pseudo(
                 set_shadow(style, role, shadow);
             }
         }
-        "color" => {
-            // An icon pseudo-element paints `background: currentColor` over
-            // its mask; the ink it takes is the region's text.
-            if let Some(color) = color_in(value, !dark) {
-                set_text(style, role, color);
-            }
-        }
         _ => {}
     }
 }
@@ -1370,15 +1367,11 @@ fn match_selector(selector: &str, dark: bool) -> Option<(Role, bool, u32, Pseudo
         )
         .then_some((Role::Root, false, 0, pseudo));
     }
-    if selector.starts_with('@')
-        || selector.contains(":nth-")
-        || selector.contains(":first-")
-        || selector.contains(":last-")
-        || selector.contains(":only-")
-    {
+    if selector.starts_with('@') {
         return None;
     }
-    let compounds = selector_compounds(selector);
+    let parts = selector_parts(selector);
+    let compounds: Vec<String> = parts.iter().map(|(_, compound)| compound.clone()).collect();
     if compounds.is_empty() {
         return None;
     }
@@ -1424,35 +1417,74 @@ fn match_selector(selector: &str, dark: bool) -> Option<(Role, bool, u32, Pseudo
     }
     let specificity = specificity(&compounds);
     for (index, node) in NODES.iter().enumerate() {
-        let mut current = Some(index);
+        let mut current = index;
         let mut hover = false;
         let mut matched = true;
-        let mut first_compound = true;
-        for compound in compounds.iter().rev() {
+        let rightmost = parts.len() - 1;
+        if !compound_matches(&parts[rightmost].1, current, dark, &mut hover) {
+            continue;
+        }
+        for at in (0..rightmost).rev() {
+            let (_, compound) = &parts[at];
+            // The combinator belongs to the part to the right.
+            let combinator = parts[at + 1].0;
             let mut found = None;
-            let mut walk = current;
-            while let Some(index) = walk {
-                if compound_matches(compound, index, dark, &mut hover) {
-                    found = Some(index);
-                    break;
+            match combinator {
+                '>' => {
+                    if let Some(parent) = NODES[current].parent
+                        && compound_matches(compound, parent, dark, &mut hover)
+                    {
+                        found = Some(parent);
+                    }
                 }
-                walk = NODES[index].parent;
+                '+' => {
+                    if let Some(sibling) = previous_sibling(current)
+                        && compound_matches(compound, sibling, dark, &mut hover)
+                    {
+                        found = Some(sibling);
+                    }
+                }
+                '~' => {
+                    let mut sibling = previous_sibling(current);
+                    while let Some(previous) = sibling {
+                        if compound_matches(compound, previous, dark, &mut hover) {
+                            found = Some(previous);
+                            break;
+                        }
+                        sibling = previous_sibling(previous);
+                    }
+                }
+                _ => {
+                    let mut walk = NODES[current].parent;
+                    while let Some(ancestor) = walk {
+                        if compound_matches(compound, ancestor, dark, &mut hover) {
+                            found = Some(ancestor);
+                            break;
+                        }
+                        walk = NODES[ancestor].parent;
+                    }
+                    // A native region collapses several Discord wrappers
+                    // into one node, so a wrapper compound may match the
+                    // same node again.
+                    if found.is_none()
+                        && collapsed(node.role)
+                        && compound_matches(compound, current, dark, &mut hover)
+                    {
+                        found = Some(current);
+                    }
+                }
             }
-            let Some(index) = found else {
+            let Some(next) = found else {
                 matched = false;
                 break;
             };
-            // A native region collapses several Discord wrappers (`.message`
-            // and `.messageContent_`, or `.sidebar_` and `.sidebarList_`) into
-            // one node, so a wrapper compound may match the same node again.
-            // Other roles need a real ancestor, which keeps broad descendant
-            // selectors from landing on the wrong region.
-            if !first_compound && index == current.unwrap_or(usize::MAX) && !collapsed(node.role) {
+            // Other roles need a real relation, which keeps broad
+            // descendant selectors from landing on the wrong region.
+            if next == current && !collapsed(node.role) {
                 matched = false;
                 break;
             }
-            first_compound = false;
-            current = Some(index);
+            current = next;
         }
         if matched {
             return Some((node.role, hover, specificity, pseudo));
@@ -1509,6 +1541,146 @@ fn is_descendant(child: usize, ancestor: usize) -> bool {
         current = NODES[parent].parent;
     }
     false
+}
+
+/// The node's 1-based position among its siblings, and how many there are.
+/// The synthetic page is a root in its own right, so it counts as one.
+fn sibling_position(node: usize) -> Option<(usize, usize)> {
+    let Some(parent) = NODES[node].parent else {
+        return Some((1, 1));
+    };
+    let siblings: Vec<usize> = (0..NODES.len())
+        .filter(|index| NODES[*index].parent == Some(parent))
+        .collect();
+    let position = siblings.iter().position(|index| *index == node)? + 1;
+    Some((position, siblings.len()))
+}
+
+/// The node's 1-based position among siblings that share one of its tags.
+fn type_position(node: usize) -> Option<(usize, usize)> {
+    let Some(parent) = NODES[node].parent else {
+        return Some((1, 1));
+    };
+    let tags = NODES[node].tags;
+    let same: Vec<usize> = (0..NODES.len())
+        .filter(|index| {
+            NODES[*index].parent == Some(parent)
+                && tags
+                    .iter()
+                    .any(|tag| NODES[*index].tags.iter().any(|known| known == tag))
+        })
+        .collect();
+    let position = same.iter().position(|index| *index == node)? + 1;
+    Some((position, same.len()))
+}
+
+/// Whether a 1-based sibling position matches `odd`, `even`, `n`, `an+b`
+/// or an integer, as `:nth-child()` writes it.
+fn nth_matches(expression: &str, position: usize) -> bool {
+    let expression = expression
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<String>();
+    if expression == "odd" {
+        return position % 2 == 1;
+    }
+    if expression == "even" {
+        return position.is_multiple_of(2);
+    }
+    let Some((coefficient, offset)) = expression.split_once('n') else {
+        return expression
+            .parse::<i64>()
+            .is_ok_and(|value| value == position as i64);
+    };
+    let coefficient = match coefficient {
+        "" | "+" => 1,
+        "-" => -1,
+        value => match value.parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+    };
+    let offset = match offset {
+        "" => 0,
+        value => match value.trim_start_matches('+').parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+    };
+    if coefficient == 0 {
+        return offset == position as i64;
+    }
+    let distance = position as i64 - offset;
+    distance % coefficient == 0 && distance / coefficient >= 0
+}
+
+/// The previous sibling of a node in the synthetic tree.
+fn previous_sibling(node: usize) -> Option<usize> {
+    let parent = NODES[node].parent?;
+    (0..node)
+        .rev()
+        .find(|index| NODES[*index].parent == Some(parent))
+}
+
+/// The selector split at its top-level combinators, rightmost last. The
+/// character on each part is its combinator with the part before it; the
+/// first part's is ignored.
+fn selector_parts(selector: &str) -> Vec<(char, String)> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut pending = ' ';
+    let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let characters = selector.chars();
+    for character in characters {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => {
+                current.push(character);
+                escaped = true;
+            }
+            '"' | '\'' if quote == Some(character) => {
+                quote = None;
+                current.push(character);
+            }
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(character);
+                current.push(character);
+            }
+            '(' | '[' if quote.is_none() => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' | ']' if quote.is_none() => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            '>' | '+' | '~' if quote.is_none() && depth == 0 => {
+                if !current.trim().is_empty() {
+                    parts.push((pending, current.trim().to_owned()));
+                    current.clear();
+                }
+                pending = character;
+            }
+            character if character.is_whitespace() && quote.is_none() && depth == 0 => {
+                if !current.trim().is_empty() {
+                    parts.push((pending, current.trim().to_owned()));
+                    current.clear();
+                    pending = ' ';
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push((pending, current.trim().to_owned()));
+    }
+    parts
 }
 
 fn compound_matches(compound: &str, node: usize, dark: bool, hover: &mut bool) -> bool {
@@ -1619,6 +1791,34 @@ fn compound_matches(compound: &str, node: usize, dark: bool, hover: &mut bool) -
                             return false;
                         }
                     }
+                    "nth-child" => {
+                        if !sibling_position(node)
+                            .is_some_and(|(position, _)| nth_matches(arguments, position))
+                        {
+                            return false;
+                        }
+                    }
+                    "nth-last-child" => {
+                        if !sibling_position(node).is_some_and(|(position, total)| {
+                            nth_matches(arguments, total + 1 - position)
+                        }) {
+                            return false;
+                        }
+                    }
+                    "nth-of-type" => {
+                        if !type_position(node)
+                            .is_some_and(|(position, _)| nth_matches(arguments, position))
+                        {
+                            return false;
+                        }
+                    }
+                    "nth-last-of-type" => {
+                        if !type_position(node).is_some_and(|(position, total)| {
+                            nth_matches(arguments, total + 1 - position)
+                        }) {
+                            return false;
+                        }
+                    }
                     _ => return false,
                 }
                 saw_anything = true;
@@ -1633,7 +1833,42 @@ fn compound_matches(compound: &str, node: usize, dark: bool, hover: &mut bool) -
                 "hover" | "focus" | "focus-visible" | "focus-within" | "active" => {
                     *hover = true;
                 }
-                "link" | "visited" | "disabled" | "checked" | "empty" => return false,
+                "first-child" => {
+                    if !sibling_position(node).is_some_and(|(position, _)| position == 1) {
+                        return false;
+                    }
+                }
+                "last-child" => {
+                    if !sibling_position(node).is_some_and(|(position, total)| position == total) {
+                        return false;
+                    }
+                }
+                "only-child" => {
+                    if !sibling_position(node).is_some_and(|(_, total)| total == 1) {
+                        return false;
+                    }
+                }
+                "first-of-type" => {
+                    if !type_position(node).is_some_and(|(position, _)| position == 1) {
+                        return false;
+                    }
+                }
+                "last-of-type" => {
+                    if !type_position(node).is_some_and(|(position, total)| position == total) {
+                        return false;
+                    }
+                }
+                "only-of-type" => {
+                    if !type_position(node).is_some_and(|(_, total)| total == 1) {
+                        return false;
+                    }
+                }
+                "empty" => {
+                    if (0..NODES.len()).any(|child| NODES[child].parent == Some(node)) {
+                        return false;
+                    }
+                }
+                "link" | "visited" | "disabled" | "checked" => return false,
                 _ => return false,
             }
             rest = after.trim_start();
@@ -1665,7 +1900,25 @@ fn class_matches(node: usize, class: &str, dark: bool) -> bool {
     NODES[node]
         .classes
         .iter()
-        .any(|known| known.eq_ignore_ascii_case(class))
+        .any(|known| class_prefix_matches(known, class))
+}
+
+/// Whether a selector class names one of a node's stable class fragments.
+/// Discord hashes the suffix per build (`chat_z_gUBg`, `chat-2ZfjoI`) and
+/// changes the separator between releases; the stem is what themes keep.
+pub(crate) fn class_prefix_matches(known: &str, class: &str) -> bool {
+    if class.eq_ignore_ascii_case(known) {
+        return true;
+    }
+    let Some(stem) = known.strip_suffix('_') else {
+        return false;
+    };
+    !stem.is_empty()
+        && class.len() > stem.len()
+        && class
+            .get(..stem.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(stem))
+        && matches!(class.as_bytes().get(stem.len()), Some(b'_' | b'-'))
 }
 
 fn theme_class(class: &str) -> Option<bool> {
@@ -1911,6 +2164,50 @@ mod tests {
     }
 
     #[test]
+    fn hashed_discord_classes_keep_their_stable_prefix() {
+        let theme = dark(
+            r#"
+            .chat_z_gUBg { background: #123456; }
+            .bg_Fd0FEH { background: #654321; }
+            "#,
+        );
+        // The page's ground is set first, then the chat's own rule wins.
+        assert_eq!(theme.native.chat, Some(Rgba::rgb(0x12, 0x34, 0x56)));
+        let background = dark(".bg_Fd0FEH { background: #654321; }");
+        assert_eq!(background.native.chat, Some(Rgba::rgb(0x65, 0x43, 0x21)));
+        let old = dark(".chat-2ZfjoI { background: #abcdef; }");
+        assert_eq!(old.native.chat, Some(Rgba::rgb(0xab, 0xcd, 0xef)));
+    }
+
+    #[test]
+    fn structural_pseudos_and_siblings_follow_the_synthetic_tree() {
+        let second = dark(
+            r#"
+            [class*="messages_"]:nth-child(2) { background: #111111; }
+            "#,
+        );
+        assert_eq!(second.native.chat, Some(Rgba::rgb(0x11, 0x11, 0x11)));
+        let first = dark(
+            r#"
+            [class*="messages_"]:first-child { background: #222222; }
+            "#,
+        );
+        assert_eq!(first.native.chat, None);
+        let adjacent = dark(
+            r#"
+            [class*="header_"] + [class*="messages_"] { background: #333333; }
+            "#,
+        );
+        assert_eq!(adjacent.native.chat, Some(Rgba::rgb(0x33, 0x33, 0x33)));
+        let general = dark(
+            r#"
+            [class*="header_"] ~ [class*="composer"] { background: #444444; }
+            "#,
+        );
+        assert_eq!(general.native.field, Some(Rgba::rgb(0x44, 0x44, 0x44)));
+    }
+
+    #[test]
     fn a_collapsed_message_wrapper_matches_both_compounds() {
         let theme = dark(
             r#"
@@ -2039,6 +2336,30 @@ mod tests {
         );
         assert_eq!(theme.native.chat, Some(Rgba::rgb(0x10, 0x20, 0x30)));
         assert_eq!(theme.native.line, Some(Rgba::rgb(0x40, 0x50, 0x60)));
+    }
+
+    #[test]
+    fn a_fixed_pseudo_decoration_does_not_become_the_regions_ground() {
+        let theme = dark(
+            r#"
+            [class*="sidebar_"]::before {
+                content: "";
+                position: absolute;
+                left: 0;
+                right: 0;
+                bottom: 52px;
+                height: 220px;
+                background: #e2342a;
+            }
+            [class*="sidebar_"]::after {
+                content: "CHANNELS";
+                position: absolute;
+                inset: 0;
+                background: #e2342a;
+            }
+            "#,
+        );
+        assert_eq!(theme.native.sidebar, None);
     }
 
     #[test]

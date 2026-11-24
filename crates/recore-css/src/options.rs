@@ -1390,6 +1390,41 @@ fn record(name: &str) -> Option<(&'static str, &'static str, Option<&'static str
             "Background",
             Some("How see-through panels are over the picture."),
         ),
+        "--rl-rail-opacity" => (
+            "Server rail opacity",
+            "Background",
+            Some("How much of the picture shows through the server rail."),
+        ),
+        "--rl-sidebar-opacity" => (
+            "Channel list opacity",
+            "Background",
+            Some("How much of the picture shows through the channel list."),
+        ),
+        "--rl-chat-opacity" => (
+            "Chat opacity",
+            "Background",
+            Some("How much of the picture shows through the messages."),
+        ),
+        "--rl-members-opacity" => (
+            "Member list opacity",
+            "Background",
+            Some("How much of the picture shows through the member list."),
+        ),
+        "--rl-composer-opacity" => (
+            "Composer opacity",
+            "Background",
+            Some("How much of the picture shows through the message box."),
+        ),
+        "--rl-raised-opacity" => (
+            "Popout opacity",
+            "Background",
+            Some("How much of the picture shows through cards and popouts."),
+        ),
+        "--rl-tooltip-opacity" => (
+            "Tooltip opacity",
+            "Background",
+            Some("How much of the picture shows through tooltips."),
+        ),
         "--rl-font-size" => (
             "Text size",
             "Typography",
