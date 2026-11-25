@@ -102,8 +102,9 @@ recording. Each change is kept at once in
 - Discord: linking, as the sign-in screen's panel, while none is linked;
   then Unlink in a build with Matrix, hidden channels, reads marked on
   Discord, idle while away, blocked people's messages hidden, and those
-  blocked, five more at a time, each with Unblock. Whether someone is
-  using ReCore (`away.rs`): a key, a click or the
+  blocked, five more at a time, each with Unblock. The account's own message
+  display, theme and language are read from Discord's settings but not shown
+  yet. Whether someone is using ReCore (`away.rs`): a key, a click or the
   wheel counts; once nobody has for 15 s, Discord hears since when, with
   idle while away, and goes AFK and idle on its own clock; moving
   pictures hold still until someone is back, the window's background

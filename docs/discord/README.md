@@ -151,6 +151,15 @@ token, so no code is scanned and no session is ended: the account left stays
 signed in on Discord as this device's session. Removing the account in use
 chooses the first one left, and removing the last unlinks ReCore from Discord.
 
+The account's own client settings are read as Discord keeps them in
+`PreloadedUserSettings` (`crates/recore-discord/src/settings.rs`): whether
+reactions, attachments, embeds and GIFs draw in messages, whether messages
+show compactly and emoticons become emoji, the theme, the language, and which
+reactions notify. A write of one of those switches carries its whole section,
+with the rest as it was: Discord puts each top-level field a PATCH carries in
+place of the old one. Voice devices, keybinds and each server's notification
+level live outside this message, so they stay Discord's.
+
 HTTPS requests and WebSockets alike trust the certificates the system trusts,
 through `rustls-platform-verifier`, so a reverse proxy whose CA is in the
 system's store works. The WebSockets share one TLS setup,
