@@ -2601,6 +2601,34 @@ mod tests {
     }
 
     #[test]
+    fn a_regions_own_custom_property_wins_over_the_roots() {
+        // `--s` set on the sidebar is what the category under it reads, as in
+        // a browser; resolving `var()` against the root's values loses it.
+        let theme = dark(
+            r#"
+            :root { --s: 20px; }
+            [class*="sidebar_"] { --s: 12px; }
+            [class*="category_"] { font-size: var(--s); }
+            "#,
+        );
+        assert_eq!(theme.native.category_size, Some(12.0));
+    }
+
+    #[test]
+    fn the_roots_variable_outranks_the_bodys() {
+        // `:root` is a pseudo-class (0,1,0); `body` is a type (0,0,1). Order
+        // does not matter.
+        let theme = dark(
+            r#"
+            :root { --c: #0000ff; }
+            body { --c: #ff0000; }
+            [class*="sidebar_"] { background: var(--c); }
+            "#,
+        );
+        assert_eq!(theme.native.sidebar, Some(Rgba::rgb(0x00, 0x00, 0xff)));
+    }
+
+    #[test]
     fn a_box_shadow_keeps_its_offset_blur_and_colour() {
         let theme = dark(
             r#"

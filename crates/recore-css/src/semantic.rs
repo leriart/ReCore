@@ -167,6 +167,10 @@ impl Variables for SemanticVars<'_> {
 /// and `@layer` order; this keeps the selectors, declarations and layer
 /// membership so the engine can apply the cascade and inheritance.
 fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<String>) -> String {
+    // Custom properties a rule on a region declares. A value that names one
+    // is left for the engine, which knows the region's own value; resolving
+    // it here would read only the root's.
+    let regions = region_vars(sheet, dark);
     let mut out = String::new();
     let layers: Vec<&str> = sheet
         .layers
@@ -227,7 +231,18 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
             if declaration.name.starts_with("--") && !used.contains(&declaration.name) {
                 continue;
             }
-            let value = colors(&declaration.value, vars, !dark);
+            // A `var()` that names a region's own property stays for the
+            // engine to resolve where the theme declares it. Anything else is
+            // resolved here, with the reader's bounded substitution, so a
+            // variable that doubles itself stops at its budget.
+            let region_local = regions
+                .iter()
+                .any(|name| declaration.value.contains(name.as_str()));
+            let value = if region_local {
+                color_functions(&declaration.value, !dark)
+            } else {
+                colors(&declaration.value, vars, !dark)
+            };
             if value.len() > 4096 || value.contains("data:") {
                 continue;
             }
@@ -245,6 +260,33 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
         }
     }
     out
+}
+
+/// The custom properties declared by rules that name a region rather than
+/// the page, so a value using one is resolved by the engine at its node.
+fn region_vars(sheet: &Stylesheet, dark: bool) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for rule in &sheet.rules {
+        if rule
+            .color_scheme
+            .is_some_and(|color_scheme| color_scheme != dark)
+        {
+            continue;
+        }
+        let page_only = rule
+            .selectors
+            .iter()
+            .all(|selector| css::root_selector(selector, dark).is_some());
+        if page_only {
+            continue;
+        }
+        for declaration in &rule.declarations {
+            if declaration.name.starts_with("--") {
+                names.insert(declaration.name.clone());
+            }
+        }
+    }
+    names
 }
 
 /// Whether a selector names a native region. A bare tag or `*` is too broad:
@@ -577,12 +619,20 @@ fn inline_vars(
 /// shorthand (`1px solid color-mix(...)`) is replaced in place.
 fn colors<'a>(value: &'a str, vars: &'a css::Vars, light: bool) -> Cow<'a, str> {
     let resolved = vars.resolve(value).unwrap_or(Cow::Borrowed(value));
-    if let Some(color) = crate::color::parse(resolved.as_ref(), light) {
+    color_functions(resolved.as_ref(), light)
+        .into_owned()
+        .into()
+}
+
+/// The colour functions `style-engine` 1.0.0 cannot evaluate replaced by the
+/// sRGB they come to, with any `var()` left for the engine to resolve.
+fn color_functions(value: &str, light: bool) -> Cow<'_, str> {
+    if let Some(color) = crate::color::parse(value, light) {
         return Cow::Owned(color.hex());
     }
-    match replace_colors(resolved.as_ref(), light) {
+    match replace_colors(value, light) {
         Some(replaced) => Cow::Owned(replaced),
-        None => resolved,
+        None => Cow::Borrowed(value),
     }
 }
 
