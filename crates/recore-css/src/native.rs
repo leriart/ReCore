@@ -665,24 +665,59 @@ fn handled(property: &str) -> bool {
         "transition-duration",
         "animation",
         "animation-duration",
-        "border",
-        "border-color",
-        "border-top",
-        "border-right",
-        "border-bottom",
-        "border-left",
-        "border-top-color",
-        "border-right-color",
-        "border-bottom-color",
-        "border-left-color",
-        "outline",
-        "outline-color",
         "accent-color",
         "caret-color",
     ];
     PAINTED
         .iter()
         .any(|painted| property.eq_ignore_ascii_case(painted))
+        || border_property(property)
+}
+
+/// The border and outline properties whose colour the window's line takes.
+/// The logical sides count as the physical ones they map to in a
+/// left-to-right window.
+const BORDER: &[&str] = &[
+    "border",
+    "border-color",
+    "border-top",
+    "border-right",
+    "border-bottom",
+    "border-left",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
+    "border-block",
+    "border-block-color",
+    "border-block-start",
+    "border-block-end",
+    "border-block-start-color",
+    "border-block-end-color",
+    "border-inline",
+    "border-inline-color",
+    "border-inline-start",
+    "border-inline-end",
+    "border-inline-start-color",
+    "border-inline-end-color",
+    "outline",
+    "outline-color",
+];
+
+fn border_property(property: &str) -> bool {
+    BORDER
+        .iter()
+        .any(|border| property.eq_ignore_ascii_case(border))
+}
+
+/// The colour a border or outline declaration gives the window's line.
+///
+/// A shorthand without a colour is `currentColor` in CSS. The window keeps
+/// the colour a lateral longhand or the shorthand itself declared, rather
+/// than the engine's default ink, so `border-style: solid;
+/// border-bottom-color: #ff0000` draws a red line and not a black one.
+fn line(value: &str, light: bool) -> Option<Rgba> {
+    color_in(value, light)
 }
 
 fn apply(style: &mut NativeStyle, write: Write<'_>, value: &str, dark: bool) {
@@ -858,19 +893,8 @@ fn apply(style: &mut NativeStyle, write: Write<'_>, value: &str, dark: bool) {
                 apply_motion(style, property, value);
             }
         }
-        "border"
-        | "border-color"
-        | "border-top"
-        | "border-right"
-        | "border-bottom"
-        | "border-left"
-        | "border-top-color"
-        | "border-right-color"
-        | "border-bottom-color"
-        | "border-left-color"
-        | "outline"
-        | "outline-color" => {
-            if let Some(color) = color_in(value, !dark) {
+        _ if border_property(property) => {
+            if let Some(color) = line(value, !dark) {
                 style.line = Some(color);
             }
         }
@@ -906,9 +930,8 @@ fn apply_pseudo(
                 }
             }
         }
-        "border" | "border-color" | "border-top" | "border-right" | "border-bottom"
-        | "border-left" | "outline" | "outline-color" => {
-            if let Some(color) = color_in(value, !dark) {
+        _ if border_property(property) => {
+            if let Some(color) = line(value, !dark) {
                 style.line = Some(fade(color, write.opacity));
             }
         }
@@ -1657,19 +1680,21 @@ fn selector_parts(selector: &str) -> Vec<(char, String)> {
     let mut pending = ' ';
     let mut depth = 0u32;
     let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let characters = selector.chars();
-    for character in characters {
-        if escaped {
-            current.push(character);
-            escaped = false;
+    let mut index = 0;
+    while index < selector.len() {
+        let Some(character) = selector[index..].chars().next() else {
+            break;
+        };
+        let length = character.len_utf8();
+        if character == '\\' {
+            // An escape belongs to the compound it starts, and the space
+            // that ends a hex escape is not a combinator.
+            let escape = escape_len(&selector[index..]).max(length);
+            current.push_str(&selector[index..index + escape]);
+            index += escape;
             continue;
         }
         match character {
-            '\\' => {
-                current.push(character);
-                escaped = true;
-            }
             '"' | '\'' if quote == Some(character) => {
                 quote = None;
                 current.push(character);
@@ -1702,6 +1727,7 @@ fn selector_parts(selector: &str) -> Vec<(char, String)> {
             }
             _ => current.push(character),
         }
+        index += length;
     }
     if !current.trim().is_empty() {
         parts.push((pending, current.trim().to_owned()));
@@ -1725,7 +1751,7 @@ fn compound_matches(compound: &str, node: usize, dark: bool, hover: &mut bool) -
             if class.is_empty() {
                 return false;
             }
-            if !class_matches(node, class, dark) {
+            if !class_matches(node, &unescape(class), dark) {
                 return false;
             }
             rest = after;
@@ -1734,7 +1760,7 @@ fn compound_matches(compound: &str, node: usize, dark: bool, hover: &mut bool) -
         }
         if let Some(after) = rest.strip_prefix('#') {
             let (id, after) = take_identifier(after);
-            if NODES[node].id != Some(id) {
+            if NODES[node].id != Some(unescape(id).as_ref()) {
                 return false;
             }
             rest = after;
@@ -1956,10 +1982,23 @@ fn theme_class(class: &str) -> Option<bool> {
 }
 
 fn attribute_matches(attribute: &str, node: usize, dark: bool) -> bool {
-    let attribute = attribute.trim();
-    let (name, operator, expected) = split_attribute(attribute);
+    // The caller passes the inside of `[...]`; accepting the brackets too
+    // keeps the matcher readable when it is called on its own.
+    let attribute = attribute.trim().trim_matches(['[', ']']);
+    let (name, operator, expected, flag) = split_attribute(attribute);
+    // HTML reads attribute names without regard to case, so `CLASS` names
+    // `class`.
     let name = name.trim().to_ascii_lowercase();
-    let expected = expected.trim().trim_matches(['"', '\'']);
+    if operator.is_empty() {
+        // Presence: only the attributes a node really carries.
+        return match name.as_str() {
+            "class" => true,
+            "id" => NODES[node].id.is_some(),
+            "role" => NODES[node].aria_role.is_some(),
+            "data-theme" => NODES[node].role == Role::Root,
+            _ => false,
+        };
+    }
     let (actual, any) = match name.as_str() {
         "class" => (
             if NODES[node].role == Role::Root {
@@ -1984,71 +2023,178 @@ fn attribute_matches(attribute: &str, node: usize, dark: bool) -> bool {
         ),
         _ => return false,
     };
+    // Attribute values compare exactly unless the selector asks for ASCII
+    // case-insensitivity with the `i` flag.
+    let insensitive = matches!(flag, Some('i'));
+    let expected = expected.trim().trim_matches(['"', '\'']);
+    let actual: Cow<'_, str> = if insensitive {
+        Cow::Owned(actual.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(actual.as_str())
+    };
+    let expected: Cow<'_, str> = if insensitive {
+        Cow::Owned(expected.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(expected)
+    };
     let values: Vec<&str> = if any {
         actual.split_whitespace().collect()
     } else {
-        vec![actual.as_str()]
+        vec![actual.as_ref()]
     };
     match operator {
         "=" => {
             if any {
-                actual.eq_ignore_ascii_case(expected)
+                actual.as_ref() == expected.as_ref()
             } else {
-                values
-                    .iter()
-                    .any(|value| value.eq_ignore_ascii_case(expected))
+                values.iter().any(|value| *value == expected.as_ref())
             }
         }
-        "~=" => {
-            any && values
+        "~=" => any && values.iter().any(|value| *value == expected.as_ref()),
+        "|=" => {
+            let prefixed = format!("{}-", expected.as_ref());
+            values
                 .iter()
-                .any(|value| value.eq_ignore_ascii_case(expected))
+                .any(|value| *value == expected.as_ref() || value.starts_with(&prefixed))
         }
-        "|=" => values.iter().any(|value| {
-            value.eq_ignore_ascii_case(expected) || value.starts_with(&format!("{expected}-"))
-        }),
-        "^=" => values.iter().any(|value| {
-            value
-                .to_ascii_lowercase()
-                .starts_with(&expected.to_ascii_lowercase())
-        }),
-        "$=" => values.iter().any(|value| {
-            value
-                .to_ascii_lowercase()
-                .ends_with(&expected.to_ascii_lowercase())
-        }),
-        "*=" => values.iter().any(|value| {
-            value
-                .to_ascii_lowercase()
-                .contains(&expected.to_ascii_lowercase())
-        }),
+        "^=" => values
+            .iter()
+            .any(|value| value.starts_with(expected.as_ref())),
+        "$=" => values
+            .iter()
+            .any(|value| value.ends_with(expected.as_ref())),
+        "*=" => values.iter().any(|value| value.contains(expected.as_ref())),
         _ => false,
     }
 }
 
-fn split_attribute(attribute: &str) -> (&str, &str, &str) {
+/// Splits `name`, `operator`, `value` and the optional `i`/`s` case flag of
+/// an attribute selector. The name is left as written, for the caller to
+/// fold; the value excludes the flag.
+fn split_attribute(attribute: &str) -> (&str, &str, &str, Option<char>) {
     for operator in ["~=", "|=", "^=", "$=", "*=", "="] {
         if let Some(index) = attribute.find(operator) {
-            return (
-                &attribute[..index],
-                operator,
-                &attribute[index + operator.len()..],
-            );
+            let (value, flag) = split_attribute_value(&attribute[index + operator.len()..]);
+            return (&attribute[..index], operator, value, flag);
         }
     }
-    (attribute, "", "")
+    (attribute, "", "", None)
+}
+
+/// Splits an attribute selector's value from its `i` or `s` flag. A quoted
+/// value ends at its closing quote; an unquoted one at the first whitespace.
+/// Anything else after the value is not a flag the reader knows.
+fn split_attribute_value(text: &str) -> (&str, Option<char>) {
+    let text = text.trim();
+    let (value, rest) = match text.as_bytes().first() {
+        Some(&quote @ (b'"' | b'\'')) => match text[1..].find(quote as char) {
+            Some(offset) => (&text[..offset + 2], &text[offset + 2..]),
+            None => (text, ""),
+        },
+        _ => match text.find(char::is_whitespace) {
+            Some(index) => (&text[..index], &text[index..]),
+            None => (text, ""),
+        },
+    };
+    match rest.trim() {
+        "" => (value, None),
+        "i" | "I" => (value, Some('i')),
+        "s" | "S" => (value, Some('s')),
+        _ => (text, None),
+    }
+}
+
+/// The length in bytes of the CSS escape at the start of `text`: the
+/// backslash, one to six hex digits and the single space that ends them; or
+/// the backslash and the one character it quotes.
+fn escape_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'\\') {
+        return 0;
+    }
+    let mut index = 1;
+    let mut digits = 0;
+    while digits < 6 && bytes.get(index).is_some_and(u8::is_ascii_hexdigit) {
+        index += 1;
+        digits += 1;
+    }
+    if digits > 0 {
+        if bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        return index;
+    }
+    match text[index..].chars().next() {
+        Some(character) => index + character.len_utf8(),
+        None => index,
+    }
+}
+
+/// `text` with its CSS escapes resolved: `\5f` (one to six hex digits, an
+/// optional space ending them) and `\_` both name `_`. A theme writes an
+/// underscore this way when it builds a generated class name by hand.
+fn unescape(text: &str) -> Cow<'_, str> {
+    if !text.contains('\\') {
+        return Cow::Borrowed(text);
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            result.push(character);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 {
+            match characters.peek() {
+                Some(next) if next.is_ascii_hexdigit() => {
+                    hex.push(*next);
+                    characters.next();
+                }
+                _ => break,
+            }
+        }
+        if hex.is_empty() {
+            // `\c` is `c` itself; a trailing backslash names nothing.
+            if let Some(next) = characters.next() {
+                result.push(next);
+            }
+            continue;
+        }
+        if let Some(decoded) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+            result.push(decoded);
+        }
+        // One space after a hex escape ends the escape, not the name.
+        if characters
+            .peek()
+            .is_some_and(|next| next.is_ascii_whitespace())
+        {
+            characters.next();
+        }
+    }
+    Cow::Owned(result)
 }
 
 fn take_identifier(text: &str) -> (&str, &str) {
-    let mut end = 0;
-    for (index, character) in text.char_indices() {
-        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '\\') {
-            end = index + character.len_utf8();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            // An escape is part of the name, though the space that ends a
+            // hex escape is not.
+            let escape = escape_len(&text[index..]);
+            if escape == 0 {
+                break;
+            }
+            index += escape;
+        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+            index += 1;
         } else {
             break;
         }
     }
-    (&text[..end], &text[end..])
+    (&text[..index], &text[index..])
 }
 
 /// Skips a balanced `(...)` after a pseudo-class and returns its inside and
@@ -2584,6 +2730,20 @@ mod tests {
     }
 
     #[test]
+    fn an_env_fallback_is_the_value_a_window_has() {
+        let theme = dark(r#"[class*="sidebar_"] { color: env(safe-area-inset-top, #ff0000); }"#);
+        assert_eq!(theme.native.secondary, Some(Rgba::rgb(0xff, 0, 0)));
+    }
+
+    #[test]
+    fn a_styled_current_color_does_not_hide_a_named_side() {
+        let theme = dark(
+            r#"[class*="sidebar_"] { color: #00ff00; border-style: solid; border-bottom-color: #ff0000; }"#,
+        );
+        assert_eq!(theme.native.line, Some(Rgba::rgb(0xff, 0, 0)));
+    }
+
+    #[test]
     fn a_focus_rule_reaches_the_window() {
         let theme = dark(
             r#"
@@ -2737,5 +2897,120 @@ mod tests {
         );
         assert_eq!(TextTransform::Uppercase.apply("Gen"), "GEN");
         assert_eq!(TextTransform::None.apply("Gen"), "Gen");
+    }
+
+    /// The lightweight matcher's own result, which `ThemeFile::native` only
+    /// carries when the engine cannot settle the theme.
+    fn native_style(css: &str) -> NativeStyle {
+        let sheet = crate::css::parse(css, |_, _| None);
+        NativeStyle::compute(&sheet.rules, &crate::css::Vars::default(), true)
+    }
+
+    /// The synthetic node for `role`.
+    fn node(role: Role) -> usize {
+        NODES
+            .iter()
+            .position(|node| node.role == role)
+            .expect("a synthetic node")
+    }
+
+    #[test]
+    fn an_attribute_case_flag_folds_ascii_case() {
+        let menu = node(Role::Menu);
+        assert!(attribute_matches(r#"role="MENU" i"#, menu, true));
+        assert!(attribute_matches(r#"role="menu" i"#, menu, true));
+        // Without the flag the value compares exactly, as CSS does.
+        assert!(!attribute_matches(r#"role="MENU""#, menu, true));
+        assert!(attribute_matches(r#"role="menu""#, menu, true));
+        assert!(attribute_matches(r#"role=menu"#, menu, true));
+    }
+
+    #[test]
+    fn an_attribute_name_is_case_insensitive_but_its_value_is_not() {
+        let sidebar = node(Role::Sidebar);
+        assert!(attribute_matches(r#"class*="sidebar_""#, sidebar, true));
+        assert!(attribute_matches(r#"CLASS*="sidebar_""#, sidebar, true));
+        assert!(attribute_matches(r#"Class*="sidebar_""#, sidebar, true));
+        assert!(!attribute_matches(r#"class*="SIDEBAR_""#, sidebar, true));
+    }
+
+    #[test]
+    fn an_attribute_presence_selector_needs_a_node_that_carries_it() {
+        assert!(attribute_matches("[role]", node(Role::Tooltip), true));
+        assert!(attribute_matches("[role]", node(Role::Menu), true));
+        assert!(!attribute_matches("[role]", node(Role::Sidebar), true));
+        assert!(attribute_matches("[class]", node(Role::Sidebar), true));
+        assert!(attribute_matches("[data-theme]", node(Role::Root), true));
+        assert!(!attribute_matches("[data-nope]", node(Role::Sidebar), true));
+    }
+
+    #[test]
+    fn a_tag_name_matches_without_regard_to_case() {
+        assert!(matches!(
+            match_selector(r#"BODY [class*="sidebar_"]"#, true),
+            Some((Role::Sidebar, ..))
+        ));
+        assert!(matches!(
+            match_selector(r#"Body > [class*="sidebar_"]"#, true),
+            Some((Role::Sidebar, ..))
+        ));
+        // A tag that names no region still paints nothing.
+        assert!(match_selector(r#"BODY span[class*="sidebar_"]"#, true).is_none());
+    }
+
+    #[test]
+    fn a_class_escape_names_the_character_it_writes() {
+        assert_eq!(unescape(r"sidebar\5f list_").as_ref(), "sidebar_list_");
+        assert_eq!(unescape(r"sidebar\5F list_").as_ref(), "sidebar_list_");
+        assert_eq!(unescape(r"sidebar\_abc").as_ref(), "sidebar_abc");
+        assert!(matches!(
+            match_selector(r".sidebar\5f abc", true),
+            Some((Role::Sidebar, ..))
+        ));
+        assert!(matches!(
+            match_selector(r".sidebar\5f list_", true),
+            Some((Role::Sidebar, ..))
+        ));
+        assert!(matches!(
+            match_selector(r"#app\-mount", true),
+            Some((Role::Root, ..))
+        ));
+    }
+
+    #[test]
+    fn a_lateral_border_colour_paints_the_line() {
+        let style = native_style(
+            r#"
+            [class*="sidebar_"] {
+                border-style: solid;
+                border-bottom-color: #ff0000;
+            }
+            "#,
+        );
+        assert_eq!(style.line, Some(Rgba::rgb(0xff, 0, 0)));
+
+        // A shorthand without a colour is `currentColor`; it must not paint
+        // the engine's default black over a lateral colour the theme named.
+        let style = native_style(
+            r#"
+            [class*="sidebar_"] {
+                border-bottom-color: #ff0000;
+                border: 1px solid;
+            }
+            "#,
+        );
+        assert_eq!(style.line, Some(Rgba::rgb(0xff, 0, 0)));
+    }
+
+    #[test]
+    fn logical_border_sides_paint_the_line() {
+        let style =
+            native_style(r#"[class*="sidebar_"] { border-inline-end: 1px solid #ff0000; }"#);
+        assert_eq!(style.line, Some(Rgba::rgb(0xff, 0, 0)));
+
+        let style = native_style(
+            r#"[class*="sidebar_"] { border-style: solid; border-block-color: #00ff00; }"#,
+        );
+        assert_eq!(style.line, Some(Rgba::rgb(0, 0xff, 0)));
     }
 }
