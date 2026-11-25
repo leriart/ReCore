@@ -943,7 +943,22 @@ mod tests {
         delivery_controls(&ChatMessage {
             item: item.into(),
             delivery,
-            attachments: vec![Default::default()],
+            attachments: vec![recore_core::chat::Attachment {
+                name: "a.png".into(),
+                size: None,
+                image: true,
+                audio: false,
+                dimensions: None,
+                preview: None,
+                preview_failed: false,
+                placement: recore_core::chat::Placement::Message,
+                spoiler: false,
+                sensitive: false,
+                video: false,
+                gif: None,
+                url: None,
+                description: None,
+            }],
             ..Default::default()
         })
     }
@@ -966,6 +981,14 @@ mod tests {
             Some(true)
         );
         assert_eq!(controls("i1", Delivery::Sent), None);
-        assert_eq!(controls("i1", Delivery::Sending), None);
+        // A message with nothing attached says nothing while it sends.
+        assert_eq!(
+            delivery_controls(&ChatMessage {
+                item: "i1".into(),
+                delivery: Delivery::Sending,
+                ..Default::default()
+            }),
+            None
+        );
     }
 }

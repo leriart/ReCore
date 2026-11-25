@@ -235,7 +235,9 @@ pub fn readable_on(ink: Color, toward: Color, ground: Color, least: f32) -> Colo
     }
     let mut best = ink;
     for step in 1..=10 {
-        best = mix(ink, toward, step as f32 / 10.0);
+        // `mix` takes the share of its first colour, so this walks from the
+        // ink towards the theme's text in tenths.
+        best = mix(ink, toward, 1.0 - step as f32 / 10.0);
         if contrast(best, ground) >= least {
             break;
         }
@@ -372,7 +374,7 @@ mod tests {
         // over it once darkened towards the palette's ink.
         let ink = crate::style::hex(0xb4637a);
         let text = crate::style::hex(0x575279);
-        let panel = crate::style::hex(0xfaf4ed);
+        let panel = crate::style::hex(0xdfdad9);
         assert!(contrast(ink, panel) < 4.5);
         let read = readable_on(ink, text, panel, 4.5);
         assert!(contrast(read, panel) >= 4.5, "{:?}", contrast(read, panel));
