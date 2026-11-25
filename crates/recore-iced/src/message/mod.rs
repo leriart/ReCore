@@ -833,9 +833,10 @@ fn thread_chip<'a>(ctx: crate::ctx::Ctx<'a>, thread: &'a chat::ThreadLink) -> El
         .into()
 }
 
-/// How a message of one's own is going, under it: "Sending..." with Cancel
-/// while its files go, "Not sent yet" while the connection is down, or "Not
-/// sent" with Retry.
+/// How a message of one's own is going, under it: "Sending..." while its
+/// files go, "Not sent yet" while the connection is down, or "Not sent" with
+/// Retry. Cancel removes one the server refused; an upload in flight cannot
+/// be taken back, so it is not offered.
 fn delivery_line<'a>(
     ctx: crate::ctx::Ctx<'a>,
     message: &ChatMessage,
@@ -845,11 +846,11 @@ fn delivery_line<'a>(
     let (words, retry, cancel) = match message.delivery {
         chat::Delivery::Sent => return None,
         chat::Delivery::Sending if message.attachments.is_empty() => return None,
-        chat::Delivery::Sending => ("Sending...", false, true),
+        chat::Delivery::Sending => ("Sending...", false, false),
         chat::Delivery::Waiting => (
             "Not sent yet. ReCore sends it when the connection returns.",
             false,
-            true,
+            false,
         ),
         // An app's command, whose row says why.
         chat::Delivery::Failed if message.item.starts_with("c:") => ("Not sent.", true, true),

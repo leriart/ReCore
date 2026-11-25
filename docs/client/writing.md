@@ -165,9 +165,11 @@ messages' text starts, breathing between half and full
 brightness under a veil of the chat's ground, drawn the same way. While
 moving pictures don't play (`pictures::plays`) the dots stand level, the
 words hold still, and neither asks for frames. Under a message of one's own that didn't go:
-"Sending..." with Cancel while its files upload, "Not sent yet" while
-the connection is down, "Not sent" with Retry; under an answer only this
-account sees, "Only you can see this · Dismiss message".
+"Sending..." while its files upload (an upload in flight cannot be taken
+back, so it offers no Cancel), "Not sent yet" while the connection is
+down, "Not sent" with Retry and Cancel, which drops the row the server
+refused; under an answer only this account sees, "Only you can see this ·
+Dismiss message".
 
 Rows are built only near the view at heights worked out ahead; once built,
 `Rows` measures them and the rows keep their real heights. While earlier
