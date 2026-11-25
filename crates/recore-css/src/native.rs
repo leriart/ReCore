@@ -2480,6 +2480,85 @@ mod tests {
     }
 
     #[test]
+    fn an_at_rule_the_reader_does_not_know_is_not_read() {
+        // `@starting-style` holds a transition's first frame; its `opacity: 0`
+        // must not leave every menu invisible.
+        let theme = dark(
+            r#"
+            @starting-style { [class*="menu_"] { opacity: 0; } }
+            @bogus { [class*="sidebar_"] { background: #ff0000; } }
+            @page { [class*="chat_"] { background: #00ff00; } }
+            "#,
+        );
+        assert_eq!(theme.native.raised_opacity, None);
+        assert_eq!(theme.native.sidebar, None);
+        assert_eq!(theme.native.chat, None);
+        assert!(
+            theme
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("@starting-style")),
+            "the note names the at-rule it left: {:?}",
+            theme.warnings
+        );
+
+        // What follows is still read.
+        let theme = dark(
+            r#"
+            @starting-style { [class*="menu_"] { opacity: 0; } }
+            [class*="sidebar_"] { background: #ff0000; }
+            "#,
+        );
+        assert_eq!(theme.native.sidebar, Some(Rgba::rgb(0xff, 0, 0)));
+        assert_eq!(theme.native.raised_opacity, None);
+    }
+
+    #[test]
+    fn a_block_that_ends_with_the_file_is_read_to_the_end() {
+        for css in [
+            r#"[class*="sidebar_"] { background: #ff0000"#,
+            r#"@media screen { [class*="sidebar_"] { background: #ff0000"#,
+            r#"@layer base { [class*="sidebar_"] { background: #ff0000"#,
+        ] {
+            let theme = dark(css);
+            assert_eq!(
+                theme.native.sidebar,
+                Some(Rgba::rgb(0xff, 0, 0)),
+                "read to the end: {css}"
+            );
+            assert!(
+                theme
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("no closing brace")),
+                "the note says the file closed it: {:?}",
+                theme.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_of_nested_blocks_stops_at_the_limit() {
+        // Twenty thousand `@media` openings used to be walked recursively and
+        // take the stack down; they stop with a warning now.
+        let mut css = String::new();
+        for _ in 0..20_000 {
+            css.push_str("@media screen{");
+        }
+        css.push_str("[class*=\"sidebar_\"] { background: #ff0000; }");
+        css.push_str(&"}".repeat(20_000));
+        let started = std::time::Instant::now();
+        let theme = dark(&css);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            theme
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nested blocks"))
+        );
+    }
+
+    #[test]
     fn a_descendant_rule_reaches_a_row_through_its_ancestors() {
         // `docs/themes.md`'s own example: the message list sits under the
         // chat, and the chat's node has to be there for the selector to

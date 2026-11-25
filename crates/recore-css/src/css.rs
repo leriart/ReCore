@@ -330,6 +330,7 @@ fn expand(
                     &mut Vec::new(),
                     origin.as_deref(),
                     layer,
+                    0,
                 );
             }
             if is_import {
@@ -410,6 +411,7 @@ fn expand(
             &mut Vec::new(),
             origin.as_deref(),
             layer,
+            0,
         );
     }
     if here.is_some() {
@@ -417,7 +419,15 @@ fn expand(
     }
 }
 
+/// How deep blocks may nest before the reader stops, so a file of nothing
+/// but `@media {` cannot exhaust the stack.
+const MAX_NESTING: usize = 64;
+
 /// Reads a block's rules into `stylesheet`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the block's state is threaded through by value, as in `expand`"
+)]
 fn parse_block(
     text: &str,
     stylesheet: &mut Stylesheet,
@@ -425,7 +435,14 @@ fn parse_block(
     containers: &mut Vec<String>,
     origin: Option<&str>,
     layer: Option<u32>,
+    nesting: usize,
 ) {
+    if nesting > MAX_NESTING {
+        stylesheet
+            .warnings
+            .push("more than 64 nested blocks; stopped".into());
+        return;
+    }
     let mut index = 0;
     let bytes = text.as_bytes();
     while index < bytes.len() {
@@ -494,14 +511,16 @@ fn parse_block(
             continue;
         };
         let prelude = text[start..brace].trim();
-        let Some(close) = matching_brace(text, brace) else {
-            stylesheet
-                .warnings
-                .push(format!("a rule '{prelude}' has no closing brace"));
-            break;
-        };
-        let body = &text[brace + 1..close];
-        index = close + 1;
+        let close = matching_brace(text, brace);
+        if close.is_none() {
+            // CSS reads a block that ends with the file as if the file closed
+            // it, so a theme whose last rule lost its `}` still paints.
+            stylesheet.warnings.push(format!(
+                "a rule '{prelude}' has no closing brace; read to the end of the file"
+            ));
+        }
+        let body = close.map_or(&text[brace + 1..], |close| &text[brace + 1..close]);
+        index = close.map_or(text.len(), |close| close + 1);
         if let Some(name) = prelude.strip_prefix('@') {
             let name = name
                 .split(|character: char| character.is_whitespace() || character == '(')
@@ -515,7 +534,15 @@ fn parse_block(
                 "layer" => {
                     let name = prelude_after(prelude, "layer").trim().to_owned();
                     let rank = stylesheet.layer_rank(&name);
-                    parse_block(body, stylesheet, scheme, containers, origin, Some(rank));
+                    parse_block(
+                        body,
+                        stylesheet,
+                        scheme,
+                        containers,
+                        origin,
+                        Some(rank),
+                        nesting + 1,
+                    );
                 }
                 "media" | "supports" | "container" | "scope" | "document" => {
                     if lower == "supports" && !supports_applies(prelude) {
@@ -538,10 +565,26 @@ fn parse_block(
                     };
                     if lower == "container" {
                         containers.push(prelude_after(prelude, "container").trim().to_owned());
-                        parse_block(body, stylesheet, applies, containers, origin, layer);
+                        parse_block(
+                            body,
+                            stylesheet,
+                            applies,
+                            containers,
+                            origin,
+                            layer,
+                            nesting + 1,
+                        );
                         containers.pop();
                     } else {
-                        parse_block(body, stylesheet, applies, containers, origin, layer);
+                        parse_block(
+                            body,
+                            stylesheet,
+                            applies,
+                            containers,
+                            origin,
+                            layer,
+                            nesting + 1,
+                        );
                     }
                 }
                 "property" => {
@@ -573,9 +616,13 @@ fn parse_block(
                 }
                 "counter-style" | "font-feature-values" => {}
                 _ => {
-                    // Unknown at-rules with blocks (@page, @starting-style) may
-                    // still hold declarations for the root; read their rules.
-                    parse_block(body, stylesheet, scheme, containers, origin, layer);
+                    // An at-rule this reader does not know is kept in the
+                    // file and not read, as a browser does: `@starting-style`
+                    // holds a transition's first frame, `@page` a printed
+                    // page, and neither styles the window.
+                    stylesheet.warnings.push(format!(
+                        "the at-rule '@{lower}' is not read; its rules are left in the file"
+                    ));
                 }
             }
             continue;
@@ -603,7 +650,15 @@ fn parse_block(
         }
         for (nested_prelude, nested_body) in nested {
             let expanded = nested_css(&selectors, &nested_prelude, &nested_body);
-            parse_block(&expanded, stylesheet, scheme, containers, origin, layer);
+            parse_block(
+                &expanded,
+                stylesheet,
+                scheme,
+                containers,
+                origin,
+                layer,
+                nesting + 1,
+            );
         }
     }
 }

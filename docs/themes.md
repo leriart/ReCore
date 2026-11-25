@@ -169,7 +169,11 @@ theme carries:
   and a feature the native window cannot paint — a `backdrop-filter`, a
   mask, a container type or a view transition — takes its `not (...)` branch
   instead. `@property` gives a variable its syntax and initial value, which
-  fills the variable when the theme does not set it.
+  fills the variable when the theme does not set it. An at-rule ReCore does
+  not read (`@starting-style`, `@page`, a future one) is kept in the file
+  and its rules are not applied, as a browser does, and the note says
+  which; a block whose closing brace is missing is read to the end of the
+  file.
 - Media queries are settled at the window's 1280 × 720 reference size:
   `prefers-color-scheme`, `prefers-reduced-motion`, `hover`, `pointer`,
   `orientation`, `width`/`height` with `min-`/`max-` or range syntax,
