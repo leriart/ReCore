@@ -757,12 +757,7 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
                     index += 1;
                 }
                 let class = &selector[start..index];
-                let known = NODES
-                    .iter()
-                    .flat_map(|node| node.classes.iter())
-                    .filter(|known| native::class_prefix_matches(known, class))
-                    .max_by_key(|known| known.len());
-                match known {
+                match stable_class(class) {
                     Some(known) => {
                         out.push_str(known);
                         changed |= !class.eq_ignore_ascii_case(known);
@@ -783,6 +778,18 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(selector)
     }
+}
+
+/// The stable stem of a generated class name, as a class selector names it:
+/// `chat_z_gUBg` is the `chat_` stem ReCore's synthetic nodes carry, since
+/// Discord hashes the suffix differently per build.
+fn stable_class(class: &str) -> Option<&'static str> {
+    NODES
+        .iter()
+        .flat_map(|node| node.classes.iter())
+        .filter(|known| native::class_prefix_matches(known, class))
+        .max_by_key(|known| known.len())
+        .copied()
 }
 
 /// The byte of the `]` that closes the `[` at `start`, respecting quotes.
@@ -813,6 +820,9 @@ fn matching_bracket(selector: &str, start: usize) -> Option<usize> {
 
 /// An attribute selector's inside with its name lowered, and its value
 /// lowered too when the `i` flag asks for a case-insensitive comparison.
+///
+/// A `class` attribute's value names a class like a class selector does, so
+/// a generated name in it is rewritten to the stable stem as well.
 fn lowercase_attribute(inside: &str) -> String {
     const OPERATORS: [&str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
     let operator = OPERATORS
@@ -826,17 +836,46 @@ fn lowercase_attribute(inside: &str) -> String {
     let rest = inside[at + operator.len()..].trim_start();
     let (value, after) = split_attribute_value(rest);
     let insensitive = after.trim().eq_ignore_ascii_case("i");
-    let value = if insensitive {
+    let mut value = if insensitive {
         value.to_ascii_lowercase()
     } else {
         value.to_owned()
     };
+    if name == "class" && matches!(operator, "~=" | "^=" | "$=" | "*=") {
+        value = stable_class_value(&value);
+    }
     let flag = if after.trim().is_empty() {
         String::new()
     } else {
         format!(" {}", after.trim())
     };
     format!("{name}{operator}{value}{flag}")
+}
+
+/// An attribute value that names a class, with a generated name rewritten to
+/// the stable stem a class selector is rewritten to. The value keeps its
+/// quotes.
+fn stable_class_value(value: &str) -> String {
+    let (quote, inside) = match value.as_bytes().first() {
+        Some(&quote @ (b'"' | b'\'')) => (
+            Some(quote as char),
+            value
+                .get(1..value.len().saturating_sub(1))
+                .unwrap_or_default(),
+        ),
+        _ => (None, value),
+    };
+    let rewritten = match stable_class(inside) {
+        // Only a generated name carries a hash after the stem. A value that
+        // is already the stem keeps the case it was written in, since an
+        // attribute's value is compared case-sensitively unless `i` says so.
+        Some(known) if inside.len() > known.len() => known.to_owned(),
+        _ => inside.to_owned(),
+    };
+    match quote {
+        Some(quote) => format!("{quote}{rewritten}{quote}"),
+        None => rewritten,
+    }
 }
 
 /// An attribute value and whatever follows it: a quoted value ends at its
@@ -1219,13 +1258,7 @@ fn build_tree(
     let mut tree = StyleTree::new();
     let super_root = tree.root();
     let mut ids = BTreeMap::new();
-    let root_classes: Vec<&str> = NODES[0]
-        .classes
-        .iter()
-        .copied()
-        .filter(|class| !class.starts_with("theme-"))
-        .collect();
-    let mut html = node("html", &root_classes, NODES[0].id, None, dark);
+    let mut html = page_node("html", NODES[0].id, dark);
     // `style-engine` 1.0.0 does not carry `!important` on custom properties.
     // The reader already settled that cascade, so its winning root values are
     // pushed in as inline declarations: the engine still inherits and
@@ -1233,7 +1266,7 @@ fn build_tree(
     html.declarations = inline_vars(vars, dark, used);
     let html_id = tree.insert_child(super_root, html);
     ids.insert(Key::Html, html_id);
-    let body = node("body", &root_classes, NODES[0].id, None, dark);
+    let body = page_node("body", NODES[0].id, dark);
     let body_id = tree.insert_child(html_id, body);
     ids.insert(Key::Body, body_id);
     for (index, node_spec) in NODES.iter().enumerate() {
@@ -1244,35 +1277,17 @@ fn build_tree(
             .map(|at| ids[&Key::Region(NODES[at].role)])
             .unwrap_or(body_id);
         let tag = node_spec.tags.first().copied().unwrap_or("div");
-        let normal = node(
-            tag,
-            node_spec.classes,
-            node_spec.id,
-            node_spec.aria_role,
-            dark,
-        );
+        let normal = node(tag, node_spec.classes, node_spec.id, node_spec.aria_role);
         let id = tree.insert_child(parent, normal);
         ids.insert(Key::Region(node_spec.role), id);
         if states.hover.contains(&node_spec.role) {
-            let mut hover = node(
-                tag,
-                node_spec.classes,
-                node_spec.id,
-                node_spec.aria_role,
-                dark,
-            );
+            let mut hover = node(tag, node_spec.classes, node_spec.id, node_spec.aria_role);
             hover.state = NodeState::HOVER | NodeState::ACTIVE;
             let hover_id = tree.insert_child(parent, hover);
             ids.insert(Key::Hover(node_spec.role), hover_id);
         }
         if states.focus.contains(&node_spec.role) {
-            let mut focus = node(
-                tag,
-                node_spec.classes,
-                node_spec.id,
-                node_spec.aria_role,
-                dark,
-            );
+            let mut focus = node(tag, node_spec.classes, node_spec.id, node_spec.aria_role);
             focus.state = NodeState::FOCUS;
             let focus_id = tree.insert_child(parent, focus);
             ids.insert(Key::Focus(node_spec.role), focus_id);
@@ -1281,13 +1296,7 @@ fn build_tree(
             // Discord's `.messageContent_` is inside `.message_`; a native
             // row is one surface, so mirror the same classes one level down
             // and read the inner winning rule.
-            let nested = node(
-                tag,
-                node_spec.classes,
-                node_spec.id,
-                node_spec.aria_role,
-                dark,
-            );
+            let nested = node(tag, node_spec.classes, node_spec.id, node_spec.aria_role);
             let nested_id = tree.insert_child(id, nested);
             ids.insert(Key::Nested(node_spec.role), nested_id);
         }
@@ -1351,25 +1360,12 @@ fn compute_styles(
 }
 
 /// One synthetic node with the attributes Discord themes match.
-fn node(
-    tag: &str,
-    classes: &[&str],
-    id: Option<&str>,
-    aria_role: Option<&str>,
-    dark: bool,
-) -> EngineNode {
-    let mut list: Vec<String> = classes.iter().map(|class| (*class).to_owned()).collect();
-    let theme = if dark { "theme-dark" } else { "theme-light" };
-    if !list.iter().any(|class| class == theme) {
-        list.push(theme.to_owned());
-    }
-    if dark {
-        for class in ["theme-darker", "theme-midnight", "theme-ash", "theme-onxy"] {
-            if !list.iter().any(|known| known == class) {
-                list.push(class.to_owned());
-            }
-        }
-    }
+///
+/// A region carries no appearance class: the page's own class belongs to the
+/// page, and a theme's `.theme-dark { ... }` is the page's rule, not every
+/// region's.
+fn node(tag: &str, classes: &[&str], id: Option<&str>, aria_role: Option<&str>) -> EngineNode {
+    let list: Vec<String> = classes.iter().map(|class| (*class).to_owned()).collect();
     let mut attrs = BTreeMap::new();
     attrs.insert("class".to_owned(), list.join(" "));
     if let Some(id) = id {
@@ -1378,10 +1374,6 @@ fn node(
     if let Some(role) = aria_role {
         attrs.insert("role".to_owned(), role.to_owned());
     }
-    attrs.insert(
-        "data-theme".to_owned(),
-        if dark { "dark" } else { "light" }.to_owned(),
-    );
     EngineNode {
         name: Some(tag.to_owned()),
         id: id.map(str::to_owned),
@@ -1389,6 +1381,40 @@ fn node(
         attrs,
         ..Default::default()
     }
+}
+
+/// The page's node, with the appearance class and `data-theme` a theme's
+/// root rules name.
+///
+/// The appearance belongs to the page alone. A theme's
+/// `.theme-dark { background: ... }` is the page's ground; it must not
+/// repaint every region that hangs under it. A descendant rule such as
+/// `.theme-dark .chat_` still reaches a region, because the regions hang
+/// under the body.
+fn page_node(tag: &str, id: Option<&str>, dark: bool) -> EngineNode {
+    let mut node = node(tag, &root_classes(), id, None);
+    let mut classes: Vec<String> = node.classes.iter().cloned().collect();
+    let theme = if dark { "theme-dark" } else { "theme-light" };
+    if !classes.iter().any(|class| class == theme) {
+        classes.push(theme.to_owned());
+    }
+    if dark {
+        for class in ["theme-darker", "theme-midnight", "theme-ash", "theme-onxy"] {
+            if !classes.iter().any(|known| known == class) {
+                classes.push(class.to_owned());
+            }
+        }
+    }
+    node.classes = classes.into_iter().collect();
+    node.attrs.insert(
+        "class".to_owned(),
+        node.classes.iter().cloned().collect::<Vec<_>>().join(" "),
+    );
+    node.attrs.insert(
+        "data-theme".to_owned(),
+        if dark { "dark" } else { "light" }.to_owned(),
+    );
+    node
 }
 
 /// The window values won by the regions' selectors.
@@ -2025,14 +2051,14 @@ fn layout(css: &str, vars: &css::Vars, dark: bool, active: &BTreeSet<Role>) -> O
         ..MediaEnv::default()
     });
     let _ = engine.set_stylesheet(css);
-    let mut html = node("html", &root_classes(), NODES[0].id, None, dark);
+    let mut html = page_node("html", NODES[0].id, dark);
     html.declarations = inline_vars(vars, dark, &used_vars_from_css(css));
     engine.insert(None, Key::Html, html).ok()?;
     engine
         .insert(
             Some(Key::Html),
             Key::Body,
-            node("body", &root_classes(), NODES[0].id, None, dark),
+            page_node("body", NODES[0].id, dark),
         )
         .ok()?;
     for node_spec in NODES
@@ -2052,13 +2078,7 @@ fn layout(css: &str, vars: &css::Vars, dark: bool, active: &BTreeSet<Role>) -> O
             .insert(
                 Some(parent),
                 Key::Region(node_spec.role),
-                node(
-                    tag,
-                    node_spec.classes,
-                    node_spec.id,
-                    node_spec.aria_role,
-                    dark,
-                ),
+                node(tag, node_spec.classes, node_spec.id, node_spec.aria_role),
             )
             .ok()?;
     }
@@ -2096,10 +2116,10 @@ pub(crate) fn paint(
     let _ = engine.set_stylesheet(&css);
     let (extra, _) =
         style_engine::css::decl::parse_inline_declarations("margin:0;width:100vw;height:100vh;");
-    let mut html = node("html", &root_classes(), NODES[0].id, None, dark);
+    let mut html = page_node("html", NODES[0].id, dark);
     html.declarations = inline_vars(vars, dark, &used);
     html.declarations.decls.extend(extra.decls.iter().cloned());
-    let mut body = node("body", &root_classes(), NODES[0].id, None, dark);
+    let mut body = page_node("body", NODES[0].id, dark);
     body.declarations = html.declarations.clone();
     engine.insert(None, Key::Html, html).ok()?;
     engine.insert(Some(Key::Html), Key::Body, body).ok()?;
@@ -2173,6 +2193,28 @@ mod tests {
         assert!(
             css.contains(r#"body [class*="Sidebar_"] .MixedCase"#),
             "{css}"
+        );
+    }
+
+    #[test]
+    fn the_appearance_class_paints_the_page_and_not_every_region() {
+        // A theme's `.theme-dark { background }` is the page's ground. It
+        // used to match every synthetic region too, so one colour repainted
+        // the rail, the sidebar, the chat and every raised surface, and a
+        // whole theme came out flat.
+        let sheet = crate::css::parse(
+            ".theme-dark { background: #101010 } .theme-dark .chat_ { color: #202020 }",
+            |_, _| None,
+        );
+        let computed = compute(&sheet, &crate::css::Vars::default(), true).expect("computed");
+        assert_eq!(computed.native.sidebar, None, "the sidebar is not the page");
+        assert_eq!(computed.native.rail, None, "nor is the rail");
+        assert_eq!(computed.native.panel, None, "nor is a raised panel");
+        // A descendant rule still reaches the region under the page.
+        assert_eq!(
+            computed.native.text,
+            Some(crate::Rgba::rgb(0x20, 0x20, 0x20)),
+            "`.theme-dark .chat_` reaches the chat"
         );
     }
 
