@@ -268,6 +268,9 @@ fn expand(
     let bytes = source.as_bytes();
     let mut index = 0;
     let mut chunk_start = 0;
+    // `@import` is only valid before the first rule; once a rule has been read,
+    // a later import is ignored, as a browser does.
+    let mut seen_rule = false;
     while index < bytes.len() {
         let start = index;
         let mut depth_in_rule = 0u32;
@@ -337,6 +340,7 @@ fn expand(
                     layer,
                     0,
                 );
+                seen_rule = true;
             }
             if is_import {
                 let rest = statement
@@ -351,7 +355,11 @@ fn expand(
                 match import_path(rest) {
                     Some((path, condition)) => {
                         let condition = ImportCondition::read(&condition);
-                        if !condition.supports || !media_applies(&condition.media) {
+                        if seen_rule {
+                            stylesheet
+                                .warnings
+                                .push(format!("an @import after a rule is ignored: {path}"));
+                        } else if !condition.supports || !media_applies(&condition.media) {
                             stylesheet.warnings.push(format!(
                                 "@import {path} does not apply here ({}); skipped",
                                 condition.media
@@ -525,6 +533,9 @@ fn parse_block(
             ));
         }
         let body = close.map_or(&text[brace + 1..], |close| &text[brace + 1..close]);
+        // A function left open at the end of a block is closed by the block's
+        // end, as a browser closes it: `background: rgb(255,0,0` still paints.
+        let body = close_open_functions(body);
         index = close.map_or(text.len(), |close| close + 1);
         if let Some(name) = prelude.strip_prefix('@') {
             let name = name
@@ -533,7 +544,7 @@ fn parse_block(
                 .unwrap_or("");
             let lower = name.to_ascii_lowercase();
             match lower.as_str() {
-                "font-face" => match font_face(body, origin) {
+                "font-face" => match font_face(&body, origin) {
                     Some(face) => stylesheet.fonts.push(face),
                     None => stylesheet
                         .warnings
@@ -543,7 +554,7 @@ fn parse_block(
                     let name = prelude_after(prelude, "layer").trim().to_owned();
                     let rank = stylesheet.layer_rank(&name);
                     parse_block(
-                        body,
+                        &body,
                         stylesheet,
                         scheme,
                         containers,
@@ -574,7 +585,7 @@ fn parse_block(
                     if lower == "container" {
                         containers.push(prelude_after(prelude, "container").trim().to_owned());
                         parse_block(
-                            body,
+                            &body,
                             stylesheet,
                             applies,
                             containers,
@@ -585,7 +596,7 @@ fn parse_block(
                         containers.pop();
                     } else {
                         parse_block(
-                            body,
+                            &body,
                             stylesheet,
                             applies,
                             containers,
@@ -599,7 +610,7 @@ fn parse_block(
                     let name = prelude.strip_prefix("@property").unwrap_or(prelude).trim();
                     if name.starts_with("--") {
                         let mut spec = PropertySpec::default();
-                        for declaration in declarations(body) {
+                        for declaration in declarations(&body) {
                             match declaration.name.as_str() {
                                 "syntax" => spec.syntax = Some(unquote(&declaration.value)),
                                 "initial-value" => spec.initial = Some(declaration.value),
@@ -619,7 +630,7 @@ fn parse_block(
                     if !name.is_empty() {
                         stylesheet
                             .keyframes
-                            .insert(name.clone(), read_keyframes(&name, body));
+                            .insert(name.clone(), read_keyframes(&name, &body));
                     }
                 }
                 "counter-style" | "font-feature-values" => {}
@@ -642,10 +653,23 @@ fn parse_block(
         if selectors.is_empty() || body.trim().is_empty() {
             continue;
         }
+        // One invalid selector invalidates the whole list, as it does in a
+        // browser; the rule is dropped rather than applied to the others.
+        let trailing_comma = prelude.trim_end().ends_with(',');
+        if trailing_comma
+            || selectors
+                .iter()
+                .any(|selector| selector.trim().is_empty() || !selector_pseudos_are_known(selector))
+        {
+            stylesheet.warnings.push(format!(
+                "a rule's selector list '{prelude}' has a selector that is not valid; the rule is dropped"
+            ));
+            continue;
+        }
         // CSS nesting: a rule's body may hold declarations, further rules,
         // and conditional at-rules. Flatten the nested selectors with `&`
         // replaced, then let this same reader settle the result.
-        let (own, nested) = split_rule_body(body);
+        let (own, nested) = split_rule_body(&body);
         if !own.trim().is_empty() {
             stylesheet.rules.push(Rule {
                 selectors: selectors.clone(),
@@ -1157,11 +1181,27 @@ fn media_query_applies_for(query: &str, scheme: Option<bool>) -> bool {
     if !text.starts_with('(') {
         let (kind, rest) = split_first_word(text);
         if !kind.is_empty() {
-            result = !matches!(kind.to_ascii_lowercase().as_str(), "print" | "speech");
-            text = rest.trim_start();
-            text = strip_prefix_ignore_case(text, "and")
-                .unwrap_or("")
-                .trim_start();
+            let kind = kind.to_ascii_lowercase();
+            if matches!(kind.as_str(), "and" | "or") {
+                return false;
+            }
+            result = !matches!(kind.as_str(), "print" | "speech");
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                text = rest;
+            } else if let Some(after) = strip_prefix_ignore_case(rest, "and").filter(|after| {
+                after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with('(')
+            }) {
+                let after = after.trim_start();
+                // `screen and` names no term after its operator.
+                if after.is_empty() {
+                    return false;
+                }
+                text = after;
+            } else {
+                // A media type combines with its conditions only through `and`.
+                return false;
+            }
         }
     }
     if !text.is_empty() {
@@ -1175,7 +1215,8 @@ fn media_query_applies_for(query: &str, scheme: Option<bool>) -> bool {
 fn media_condition(condition: &str, scheme: Option<bool>) -> bool {
     let condition = condition.trim();
     if condition.is_empty() {
-        return true;
+        // An empty term means the query had an operator without a side.
+        return false;
     }
     if let Some(rest) = strip_prefix_ignore_case(condition, "not")
         && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
@@ -1184,15 +1225,18 @@ fn media_condition(condition: &str, scheme: Option<bool>) -> bool {
     }
     let or_parts = split_condition(condition, "or");
     if or_parts.len() > 1 {
-        return or_parts.iter().any(|part| media_condition(part, scheme));
+        return or_parts.iter().all(|part| !part.is_empty())
+            && or_parts.iter().any(|part| media_condition(part, scheme));
     }
     let and_parts = split_condition(condition, "and");
     if and_parts.len() > 1 {
-        return and_parts.iter().all(|part| media_condition(part, scheme));
+        return and_parts.iter().all(|part| !part.is_empty())
+            && and_parts.iter().all(|part| media_condition(part, scheme));
     }
     let inner = outer_parens(condition).unwrap_or(condition).trim();
     if inner.is_empty() {
-        return true;
+        // `()` is an empty feature, not a condition any window matches.
+        return false;
     }
     if let Some(rest) = strip_prefix_ignore_case(inner, "not")
         && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
@@ -1214,6 +1258,7 @@ fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
         // is a malformed condition, which no window matches.
         let name = feature.trim().to_ascii_lowercase();
         if name.is_empty()
+            || matches!(name.as_str(), "and" | "or" | "not" | "only")
             || !name
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || character == '-')
@@ -1580,38 +1625,43 @@ fn supports_applies(prelude: &str) -> bool {
 
 fn supports_value(condition: &str) -> bool {
     let condition = condition.trim();
-    if let Some(rest) = condition.strip_prefix("not ") {
-        return !supports_value(rest);
+    // A pair of parentheses may wrap a complete condition rather than a
+    // declaration: `((display: grid) and (not (display: bogus)))`. Peeling
+    // that level before the operators makes the tree visible.
+    if let Some(inner) = outer_parens(condition) {
+        return supports_value(inner);
+    }
+    if let Some(rest) = strip_prefix_ignore_case(condition, "not")
+        && (rest.starts_with(char::is_whitespace) || rest.starts_with('('))
+    {
+        let rest = rest.trim_start();
+        return !rest.is_empty() && !supports_value(rest);
     }
     let or_parts = split_condition(condition, "or");
     if or_parts.len() > 1 {
-        return or_parts.iter().any(|part| supports_value(part));
+        return or_parts.iter().all(|part| !part.is_empty())
+            && or_parts.iter().any(|part| supports_value(part));
     }
     let and_parts = split_condition(condition, "and");
     if and_parts.len() > 1 {
-        return and_parts.iter().all(|part| supports_value(part));
+        return and_parts.iter().all(|part| !part.is_empty())
+            && and_parts.iter().all(|part| supports_value(part));
+    }
+    if let Some(selector) = strip_prefix_ignore_case(condition, "selector") {
+        let selector = selector.trim_start();
+        if let Some(after) = selector.strip_prefix('(')
+            && let Some(end) = matching_paren(after)
+            && after[end + 1..].trim().is_empty()
+        {
+            let argument = after[..end].trim();
+            return !argument.is_empty() && selector_pseudos_are_known(argument);
+        }
     }
     let inner = condition
         .strip_prefix('(')
         .and_then(|text| text.strip_suffix(')'))
         .unwrap_or(condition)
         .trim();
-    if let Some(selector) = strip_prefix_ignore_case(inner, "selector") {
-        let selector = selector.trim_start();
-        if let Some(inner) = selector
-            .strip_prefix('(')
-            .and_then(|rest| matching_paren(rest).map(|end| &rest[..end]))
-        {
-            // The engine's own selector support is narrower than ReCore's
-            // regions (no `:nth-` structure), so the question stays whether
-            // the window's matcher knows the feature.
-            let lower = inner.to_ascii_lowercase();
-            return !(lower.contains(":nth-")
-                || lower.contains(":first-")
-                || lower.contains(":last-")
-                || lower.contains(":only-"));
-        }
-    }
     // A native window paints no blur, mask, container query or view
     // transition, so a theme's branch that needs one is not taken; its
     // `not (...)` fallback is.
@@ -1638,6 +1688,190 @@ fn supports_value(condition: &str) -> bool {
     declaration_is_valid(inner)
 }
 
+/// Whether every pseudo-class and pseudo-element in `selector` is one the
+/// native matcher reads. `selector()` asks about syntax, so a selector that
+/// names an unknown pseudo is unsupported even when its subject is a region.
+fn selector_pseudos_are_known(selector: &str) -> bool {
+    // `:is()` and `:where()` forgive an argument that is not a valid
+    // selector; the rule still applies to the others. Their arguments are
+    // therefore left out before the names are checked.
+    let selector = without_forgiving_arguments(selector);
+    let selector = selector.as_str();
+    let bytes = selector.as_bytes();
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut brackets = 0u32;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' | b'\'' if quote == Some(byte) => quote = None,
+            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
+            b'[' if quote.is_none() => brackets += 1,
+            b']' if quote.is_none() => brackets = brackets.saturating_sub(1),
+            b':' if quote.is_none() && brackets == 0 => {
+                let mut start = index + 1;
+                if bytes.get(start) == Some(&b':') {
+                    start += 1;
+                }
+                let mut end = start;
+                for (offset, character) in selector[start..].char_indices() {
+                    if character.is_alphanumeric() || matches!(character, '-' | '_') {
+                        end = start + offset + character.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                if end == start || !pseudo_name_is_known(&selector[start..end]) {
+                    return false;
+                }
+                index = end;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    true
+}
+
+/// `selector` with the arguments of every `:is()` and `:where()` blanked
+/// out, so a forgiving list does not make the rule invalid.
+fn without_forgiving_arguments(selector: &str) -> String {
+    let mut out = String::with_capacity(selector.len());
+    let mut rest = selector;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let next = [":is(", ":where("]
+            .iter()
+            .filter_map(|function| lower.find(function).map(|at| (at, function.len())))
+            .min_by_key(|(at, _)| *at);
+        let Some((at, length)) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        let after = &rest[at + length..];
+        let Some(end) = matching_paren(after) else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[at..at + length]);
+        out.push(')');
+        rest = &after[end + 1..];
+    }
+}
+
+/// The pseudo names ReCore's own selector matcher knows: the interaction and
+/// structural states, the functional selector lists, the window-wide
+/// pseudo-elements, and the scrollbar family themes skin.
+fn pseudo_name_is_known(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    // A vendor pseudo (`::-webkit-scrollbar-thumb`) is valid syntax even
+    // where the window cannot paint it; a name that is not a CSS pseudo at
+    // all makes its selector invalid.
+    if name.starts_with('-') {
+        return true;
+    }
+    matches!(
+        name.as_str(),
+        // States and structures a theme uses on a region.
+        "hover"
+            | "focus"
+            | "focus-visible"
+            | "focus-within"
+            | "active"
+            | "not"
+            | "is"
+            | "where"
+            | "has"
+            | "root"
+            | "empty"
+            | "first-child"
+            | "last-child"
+            | "only-child"
+            | "first-of-type"
+            | "last-of-type"
+            | "only-of-type"
+            | "nth-child"
+            | "nth-last-child"
+            | "nth-of-type"
+            | "nth-last-of-type"
+            | "before"
+            | "after"
+            | "selection"
+            | "placeholder"
+            | "-moz-selection"
+            | "-moz-placeholder"
+            | "-webkit-input-placeholder"
+            // States CSS defines beyond the window's own matcher. They are
+            // valid syntax, so a list containing one is not invalid.
+            | "any-link"
+            | "autofill"
+            | "blank"
+            | "checked"
+            | "default"
+            | "defined"
+            | "dir"
+            | "disabled"
+            | "enabled"
+            | "first"
+            | "first-letter"
+            | "first-line"
+            | "fullscreen"
+            | "future"
+            | "in-range"
+            | "indeterminate"
+            | "invalid"
+            | "lang"
+            | "last"
+            | "left"
+            | "link"
+            | "local-link"
+            | "marker"
+            | "modal"
+            | "optional"
+            | "out-of-range"
+            | "past"
+            | "paused"
+            | "picture-in-picture"
+            | "placeholder-shown"
+            | "playing"
+            | "popover-open"
+            | "read-only"
+            | "read-write"
+            | "required"
+            | "right"
+            | "scope"
+            | "state"
+            | "target"
+            | "target-within"
+            | "user-invalid"
+            | "user-valid"
+            | "valid"
+            | "visited"
+            | "backdrop"
+            | "cue"
+            | "file-selector-button"
+            | "part"
+            | "slotted"
+            | "spelling-error"
+            | "grammar-error"
+            | "target-text"
+            | "view-transition"
+            | "view-transition-group"
+            | "view-transition-image-pair"
+            | "view-transition-old"
+            | "view-transition-new"
+    ) || name.starts_with("-webkit-scrollbar")
+}
+
 /// Whether the engine reads `condition` (`display: grid`) as a declaration.
 fn declaration_is_valid(condition: &str) -> bool {
     let Some((property, value)) = condition.split_once(':') else {
@@ -1662,34 +1896,84 @@ fn declaration_is_valid(condition: &str) -> bool {
     })
 }
 
-/// Splits on `and`/`or` outside parentheses.
+/// Splits on `and`/`or` outside parentheses. A keyword with no term after it
+/// leaves an empty last part, so callers can reject `(x) and` as malformed
+/// rather than reading it as `(x)`.
 fn split_condition<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
-    let needle = format!(" {keyword} ");
+    let keyword_len = keyword.len();
     let mut parts = Vec::new();
     let mut depth = 0u32;
     let mut start = 0;
+    let mut trailing = false;
     let bytes = text.as_bytes();
     let mut index = 0;
-    while index + needle.len() <= bytes.len() {
+    while index + keyword_len <= bytes.len() {
         match bytes[index] {
             b'(' => depth += 1,
             b')' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if depth == 0 && text[index..].starts_with(&needle) {
+        // A keyword is only an operator between two terms: whitespace before
+        // it, whitespace or the end after it, and no parenthesis around it.
+        if depth == 0
+            && index > 0
+            && bytes[index - 1].is_ascii_whitespace()
+            && bytes[index..index + keyword_len].eq_ignore_ascii_case(keyword.as_bytes())
+            && bytes
+                .get(index + keyword_len)
+                .is_none_or(|byte| byte.is_ascii_whitespace())
+        {
             parts.push(text[start..index].trim());
-            start = index + needle.len();
-            index = start;
+            let after = index + keyword_len;
+            if text[after..].trim().is_empty() {
+                trailing = true;
+                break;
+            }
+            start = after;
+            index = after;
             continue;
         }
         index += 1;
     }
-    if start > 0 {
+    if trailing {
+        parts.push("");
+    } else if start > 0 {
         parts.push(text[start..].trim());
-        parts
     } else {
-        vec![text]
+        parts.push(text);
     }
+    parts
+}
+
+/// Closes the functions a block left open at its end, as a browser closes
+/// them at the end of a stylesheet: `rgb(255,0,0` is read as `rgb(255,0,0)`.
+fn close_open_functions(text: &str) -> Cow<'_, str> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    for &byte in text.as_bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' | b'\'' if quote == Some(byte) => quote = None,
+            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
+            b'(' if quote.is_none() => depth += 1,
+            b')' if quote.is_none() => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        return Cow::Borrowed(text);
+    }
+    let mut closed = String::with_capacity(text.len() + depth);
+    closed.push_str(text);
+    for _ in 0..depth {
+        closed.push(')');
+    }
+    Cow::Owned(closed)
 }
 
 /// Everything between `{` and its `}`.
@@ -3151,6 +3435,35 @@ mod tests {
     }
 
     #[test]
+    fn a_selector_list_with_an_invalid_member_drops_the_rule() {
+        let sheet = parse(
+            ".a, :bogus-pseudo { color: red } .b { color: blue } .c, { color: green }",
+            |_, _| None,
+        );
+        let selectors: Vec<&str> = sheet
+            .rules
+            .iter()
+            .map(|rule| rule.selectors[0].as_str())
+            .collect();
+        assert_eq!(selectors, [".b"]);
+        assert!(
+            sheet
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("not valid"))
+                .count()
+                >= 2,
+            "{:?}",
+            sheet.warnings
+        );
+
+        // A pseudo-element CSS defines is valid syntax even where the window
+        // cannot paint it, so its rule stays.
+        let sheet = parse(".a:checked, .b::marker { color: red }", |_, _| None);
+        assert_eq!(sheet.rules.len(), 1);
+    }
+
+    #[test]
     fn a_media_feature_without_a_value_matches_nothing() {
         for query in [
             "(min-width:)",
@@ -3292,11 +3605,149 @@ mod tests {
             r#"
             @supports selector(:has(.child)) { .has { --x: 1; } }
             @supports selector(:nth-child(2)) { .nth { --x: 2; } }
+            @supports selector(:bogus-pseudo) { .bogus { --x: 3; } }
             "#,
             |_, _| None,
         );
+        let selectors: Vec<&str> = sheet
+            .rules
+            .iter()
+            .map(|rule| rule.selectors[0].as_str())
+            .collect();
+        assert_eq!(selectors, [".has", ".nth"]);
+    }
+
+    #[test]
+    fn a_supports_selector_validates_every_pseudo_name() {
+        // ReCore's matcher knows these, and `selector()` asks about the
+        // matcher rather than about the browser's full selector syntax.
+        assert!(supports_value("selector(:has(.x))"));
+        assert!(supports_value("selector(:is(.a, .b):hover)"));
+        assert!(supports_value("selector(:nth-child(2n + 1))"));
+        assert!(supports_value("selector(::selection)"));
+        assert!(supports_value("selector(::-webkit-scrollbar-thumb:hover)"));
+        assert!(supports_value("selector([data-x=\"a:b\"])"));
+        // A name the list does not hold makes the whole selector unsupported.
+        assert!(!supports_value("selector(:bogus-pseudo)"));
+        assert!(!supports_value("selector(:not(:bogus-pseudo))"));
+        assert!(!supports_value("selector(::bogus-element)"));
+        assert!(!supports_value("selector()"));
+    }
+
+    #[test]
+    fn supports_unwraps_a_grouped_condition() {
+        assert!(supports_value(
+            "((display: grid) and (not (display: bogus)))"
+        ));
+        assert!(supports_value("((display: grid) or (display: bogus))"));
+        assert!(!supports_value("((display: bogus) and (color: red))"));
+        assert!(supports_value("(not (display: bogus))"));
+        assert!(supports_value("((display: grid))"));
+    }
+
+    #[test]
+    fn a_media_condition_without_a_term_does_not_apply() {
+        for query in [
+            "screen and",
+            "only screen and",
+            "not screen and",
+            "screen and ",
+            "(min-width: 1000px) and",
+            "(min-width: 1000px) or",
+            "(min-width: 1000px) and ",
+            "screen and (min-width: 1000px) and",
+            "screen and (min-width: 1000px) or",
+            "and (min-width: 1000px)",
+            "()",
+            "( )",
+            "(min-width:)",
+            "(min-width: )",
+        ] {
+            assert!(!media_applies(query), "'{query}' applies");
+        }
+        // A feature's value is not an operator even when spelled like one.
+        assert!(media_applies("(bogus-feature: and)"));
+        assert!(media_applies("screen and (min-width: 1000px)"));
+        assert!(media_applies("only screen and (min-width: 1000px)"));
+        assert!(!media_applies("not screen and (min-width: 1000px)"));
+    }
+
+    #[test]
+    fn an_import_after_a_rule_is_ignored() {
+        let mut read = Vec::new();
+        let sheet = parse(
+            ":root { --x: 1; } @import \"late.css\"; :root { --y: 2; }",
+            |_, path| {
+                read.push(path.to_owned());
+                Some((":root { --late: 3; }".to_owned(), PathBuf::from(path)))
+            },
+        );
+        assert!(read.is_empty(), "{read:?}");
+        assert!(sheet.rules.iter().all(|rule| {
+            rule.declarations
+                .iter()
+                .all(|declaration| declaration.name != "--late")
+        }));
+        assert!(
+            sheet
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("an @import after a rule is ignored")),
+            "{:?}",
+            sheet.warnings
+        );
+
+        // An import at the start of a sheet, and one at the start of the sheet
+        // it imports, are both in the preamble and are read.
+        let mut read = Vec::new();
+        let sheet = parse("@import \"first.css\"; :root { --x: 1; }", |_, path| {
+            read.push(path.to_owned());
+            let text = if path == "first.css" {
+                "@import \"nested.css\"; :root { --first: 1; }"
+            } else {
+                ":root { --nested: 1; }"
+            };
+            Some((text.to_owned(), PathBuf::from(path)))
+        });
+        assert_eq!(read, ["first.css", "nested.css"]);
+        assert_eq!(sheet.rules.len(), 3);
+        assert!(
+            !sheet
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ignored"))
+        );
+    }
+
+    #[test]
+    fn a_function_left_open_is_closed_at_the_end_of_the_file() {
+        let sheet = parse(
+            "[class*=\"sidebar_\"]{background:#ff0000}\
+             [class*=\"chat_\"]{background:rgb(0,255,0",
+            |_, _| None,
+        );
+        assert_eq!(sheet.rules.len(), 2);
+        assert_eq!(sheet.rules[0].declarations[0].value, "#ff0000");
+        assert_eq!(sheet.rules[1].declarations[0].name, "background");
+        assert_eq!(sheet.rules[1].declarations[0].value, "rgb(0,255,0)");
+    }
+
+    #[test]
+    fn a_function_left_open_does_not_eat_the_previous_declaration() {
+        let sheet = parse(
+            "[class*=\"sidebar_\"]{color:#00ff00;background:rgb(255,0,0}",
+            |_, _| None,
+        );
         assert_eq!(sheet.rules.len(), 1);
-        assert_eq!(sheet.rules[0].selectors[0], ".has");
+        let declarations: Vec<(&str, &str)> = sheet.rules[0]
+            .declarations
+            .iter()
+            .map(|declaration| (declaration.name.as_str(), declaration.value.as_str()))
+            .collect();
+        assert_eq!(
+            declarations,
+            [("color", "#00ff00"), ("background", "rgb(255,0,0)")]
+        );
     }
 
     #[test]
