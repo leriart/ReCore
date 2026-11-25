@@ -599,7 +599,10 @@ fn with_commands(extra: usize) -> (crate::app::App, tempfile::TempDir) {
         recore_discord::commands::USE_APPLICATION_COMMANDS,
     };
     use std::sync::Arc;
-    let (mut app, folder) = super::server::discord_server(USE_APPLICATION_COMMANDS, |_, _| {});
+    let (mut app, folder) = super::server::discord_server(
+        USE_APPLICATION_COMMANDS | recore_core::recore_discord::ready::permission::ATTACH_FILES,
+        |_, _| {},
+    );
     app.client
         .dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
     app.client

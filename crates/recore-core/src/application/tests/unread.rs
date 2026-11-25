@@ -248,6 +248,23 @@ fn mark_unread_reads_up_to_the_message_before_and_holds_until_the_channel_is_lef
             "107".into()
         ))
     );
+    // A result found by a search needn't be loaded, and its link is still
+    // its room's; a Matrix id or a non-Discord room has none.
+    assert_eq!(
+        crate::application::AppState::found_link("discord:10:21", "d:999"),
+        Some((
+            "https://discord.com/channels/10/21/999".into(),
+            "999".into()
+        ))
+    );
+    assert_eq!(
+        crate::application::AppState::found_link("discord:10:21", "s0"),
+        None
+    );
+    assert_eq!(
+        crate::application::AppState::found_link("matrix:!room:example.org", "d:999"),
+        None
+    );
     // Reads stay in ReCore here, so this does too.
     assert!(matches!(
         app.dispatch(Action::MarkUnread("d:107".into())).as_slice(),

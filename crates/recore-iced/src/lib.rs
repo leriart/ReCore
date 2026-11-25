@@ -111,6 +111,7 @@ mod server_settings;
 mod settings;
 use recore_iced_kit::sheet;
 mod shell;
+mod shortcuts;
 mod sidebar;
 mod signin;
 mod spelling;

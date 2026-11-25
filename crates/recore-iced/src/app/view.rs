@@ -439,6 +439,9 @@ impl App {
         if let Some(prompt) = crate::mfa::view(&self.mfa, self.ctx()) {
             layers = layers.push(self.popup(L(Layer::Mfa), prompt));
         }
+        if let Some(sheet) = crate::shortcuts::view(&self.shortcuts, self.ctx()) {
+            layers = layers.push(sheet);
+        }
         // While the keys are on the messages a press says so, for one off
         // the list to take them (`timeline::keys::follow_press`).
         let content = crate::widgets::RightPress::spot(
@@ -532,7 +535,13 @@ impl App {
                     .height(Length::Fill),
             );
         }
-        crate::widgets::CtrlWheel::new(layers, zoom_turn, recore_core::zoom::Wheel::reset).into()
+        let frame =
+            crate::widgets::CtrlWheel::new(layers, zoom_turn, recore_core::zoom::Wheel::reset);
+        // What the overlays are placed by is the size iced lays out, which a
+        // display change can alter without a window resize event.
+        iced::widget::sensor(frame)
+            .on_resize(|size| Message::Shell(crate::shell::Event::Resized(size)))
+            .into()
     }
 
     /// ReCord's `rl-screen-in`: the new room's content fades back from the

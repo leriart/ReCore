@@ -1039,7 +1039,8 @@ fn a_forum_post_needs_a_title_a_message_and_a_tag_the_forum_requires() {
         "id": "10", "owner_id": "99", "properties": {"name": "Test"},
         "roles": [{"id": "10", "name": "@everyone", "position": 0, "permissions": (
             permission::VIEW_CHANNEL | permission::SEND_MESSAGES
-                | permission::READ_MESSAGE_HISTORY).to_string()}],
+                | permission::READ_MESSAGE_HISTORY
+                | permission::ATTACH_FILES).to_string()}],
         "channels": [
             {"id": "11", "type": 0, "name": "general", "position": 0},
             {"id": "15", "type": 15, "name": "ideas", "position": 1, "flags": 16,

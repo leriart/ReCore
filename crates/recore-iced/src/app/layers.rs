@@ -21,6 +21,8 @@ use crate::{
 /// take keys and Escape, topmost first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layer {
+    /// Help's card of shortcuts.
+    Shortcuts,
     Inbox,
     Mfa,
     ConfirmDelete,
@@ -74,7 +76,8 @@ pub enum Layer {
 }
 
 /// Every layer, in the order they take keys and Escape.
-const LAYERS: [Layer; 45] = [
+const LAYERS: [Layer; 46] = [
+    Layer::Shortcuts,
     Layer::Inbox,
     Layer::Mfa,
     Layer::ConfirmDelete,
@@ -263,6 +266,7 @@ impl App {
     fn is_open(&self, layer: Layer) -> bool {
         let state = self.client.state();
         match layer {
+            Layer::Shortcuts => self.shortcuts.open,
             Layer::Inbox => self.inbox.is_some(),
             Layer::Mfa => self.client.app.mfa_prompt().is_some(),
             Layer::ConfirmDelete => state.confirm_delete.is_some(),
@@ -545,6 +549,7 @@ impl App {
     /// Closes `layer` as Escape does.
     fn shut(&mut self, layer: Layer) -> Task<Message> {
         match layer {
+            Layer::Shortcuts => crate::shortcuts::close(self),
             Layer::Inbox => {
                 self.inbox = None;
                 Task::none()

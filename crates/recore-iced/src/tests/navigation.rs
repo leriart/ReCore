@@ -274,19 +274,18 @@ fn the_dm_search_keeps_the_dms_whose_names_hold_it() {
 }
 
 #[test]
-fn a_short_dm_list_recovers_after_a_scrolled_sidebar() {
+fn a_short_dm_list_reports_its_own_scroll_after_a_long_one() {
     let (mut app, _folder) = preview();
     // The sidebar can carry the scroll report from a long server list
     // into the first frame of a shorter DM list.
     app.sidebar.scroll.offset = 2000.0;
     let _ = app.update(Message::Rail(crate::rail::Event::Home));
-    assert!(!shows(&app, "Friday crew"));
     interact(&mut app, |ui| {
         ui.simulate([iced::Event::Window(iced::window::Event::RedrawRequested(
             std::time::Instant::now(),
         ))]);
     });
-    assert_eq!(app.sidebar.scroll.offset, 0.0);
+    assert_eq!(app.sidebar.scroll.offset, 0.0, "the list that fits says so");
     assert!(shows(&app, "Friday crew"));
 }
 

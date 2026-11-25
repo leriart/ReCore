@@ -129,7 +129,8 @@ own, which a stream hands to the event loop as messages; nothing polls.
   (on the Friends page "Friends", with the people icon), the Inbox
   (Unreads and Mentions
   of the rooms the core knows, a click going there) and Help (18 px
-  glyphs in 32 px boxes), and minimize,
+  glyphs in 32 px boxes; Help opens the keyboard's card, `shortcuts.rs`,
+  which Escape, its close button or a click outside closes), and minimize,
   maximize and close, drawn as 10 px strokes the way Discord's frame draws
   them; its ground moves the window after a 3 px drag and a
   double click maximizes it, and its edges resize it. It goes while the
@@ -138,6 +139,11 @@ own, which a stream hands to the event loop as messages; nothing polls.
   sums or at the pointer needn't know it's there, and `App::window` is
   that room's size. Alt+Left and Alt+Right, and the mouse's back and
   forward buttons, go back and forward too, whichever bar there is.
+- Help's card (`shortcuts.rs`) sets out the keys by section: Navigation,
+  Search, Writing, Window and Messages. Each key is a sunken cap in the
+  theme's edge, its words beside it, and a line under the columns adds
+  the keys a message stepped on takes. The card is a `dialog`, so the rest
+  of the window is dimmed and a click outside closes it.
 - Zoom: Ctrl with + or - steps through the core's `zoom` levels, no
   further in than the window's room allows, and Ctrl+0 goes back to 100%;
   Ctrl and the wheel step too (a notch, or 60 px of a touchpad), taken

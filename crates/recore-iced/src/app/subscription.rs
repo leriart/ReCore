@@ -31,14 +31,6 @@ impl App {
             iced::Event::Window(event) => crate::uploads::drops(&event),
             _ => None,
         });
-        // What the overlays are placed by: the window's size as it is,
-        // not as it was asked for.
-        let sizes = iced::event::listen_with(|event, _, _| match event {
-            iced::Event::Window(
-                iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
-            ) => Some(Message::Shell(crate::shell::Event::Resized(size))),
-            _ => None,
-        });
         // Ctrl with + or - zooms wherever the keys are.
         let zooms = iced::event::listen_with(|event, _, _| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -71,7 +63,6 @@ impl App {
             keys,
             fonts,
             drops,
-            sizes,
             zooms,
             sounds,
             crate::window_bar::history_keys(),

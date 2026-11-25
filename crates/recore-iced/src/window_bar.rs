@@ -1,6 +1,7 @@
 //! The title bar ReCore draws in place of the desktop's, with its Discord
-//! look: Back and Forward, where ReCore is in the middle, Inbox and Help,
-//! then minimize, maximize and close. Pressing and moving it moves the
+//! look: Back and Forward, where ReCore is in the middle, Inbox and Help
+//! (which opens the shortcuts card, `shortcuts.rs`), then minimize,
+//! maximize and close. Pressing and moving it moves the
 //! window, a double click maximizes it, and its edges resize it. The Inbox
 //! opens its popout under it: the channels and conversations with unread
 //! messages, or those that mention this account.
@@ -42,9 +43,6 @@ const INBOX_MOST: f32 = 560.0;
 const INBOX_ROW: f32 = 56.0;
 /// Round the inbox's rows.
 const INBOX_PAD: f32 = 4.0;
-
-/// Where Discord's help opens.
-const HELP: &str = "https://support.discord.com";
 
 /// How far the pointer moves with the button down before the window moves,
 /// so a double click still maximizes it.
@@ -287,10 +285,7 @@ pub fn update(app: &mut App, event: Event) -> Task<Message> {
             app.inbox = None;
             Task::none()
         }
-        Event::Help => {
-            crate::browser::open(HELP);
-            Task::none()
-        }
+        Event::Help => crate::shortcuts::toggle(app),
         Event::Press => {
             app.bar_drag.armed = Some(None);
             Task::none()

@@ -130,6 +130,8 @@ pub struct App {
     pub modifiers: keyboard::Modifiers,
     /// The message added to one being forwarded.
     pub forward: crate::forward::Forward,
+    /// Help's card of shortcuts, while it's open.
+    pub shortcuts: crate::shortcuts::Shortcuts,
     /// The confirmation's focused button: Delete (true) or Cancel.
     pub confirm_focus: bool,
     /// Whether a batch of pictures to ask for is due; what was asked for
@@ -371,6 +373,7 @@ impl App {
             uploads: Default::default(),
             modifiers: keyboard::Modifiers::default(),
             forward: Default::default(),
+            shortcuts: Default::default(),
             confirm_focus: true,
             asking: false,
             reporting: false,
@@ -511,6 +514,7 @@ impl App {
                 let mut cx = crate::ctx::cx!(self);
                 self.forward.update(event, &mut cx)
             }
+            Message::Shortcuts(event) => crate::shortcuts::update(self, event),
             Message::Select(select) => {
                 crate::timeline::selection::select(self, select);
                 Task::none()
@@ -673,6 +677,10 @@ impl App {
             Message::Search(crate::search::Event::SortMenu) => {
                 let at = self.pressed.get();
                 crate::search::open_sort_menu(self, at)
+            }
+            Message::Search(crate::search::Event::Menu(index)) => {
+                let at = self.pressed.get();
+                crate::search::open_found_menu(self, index, at)
             }
             Message::Search(crate::search::Event::Filters(event)) => {
                 crate::search_filters::update(self, event)

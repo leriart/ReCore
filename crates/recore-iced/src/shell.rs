@@ -124,7 +124,7 @@ pub enum Event {
     MonitorScaled(window::Id, Option<f32>),
     /// The banner that the GPU failed to start, dismissed.
     DismissGpuNotice,
-    /// The window took another size, or opened at one.
+    /// The size iced laid out for the window.
     Resized(Size),
     /// A key pressed with Ctrl, which may zoom.
     Zoom(keyboard::Key, key::Physical),
@@ -222,6 +222,7 @@ impl App {
                     self.shell.display_scale = Some(scale);
                     // Frames are made at the window's pixels.
                     crate::call::stage::place_videos(self);
+                    crate::playback::resize_full_clip(self);
                 }
                 Task::none()
             }
@@ -243,6 +244,7 @@ impl App {
                     tracing::info!(?scale, window = ?self.shell.display_scale, "the monitor's scale");
                     self.shell.monitor_scale = scale;
                     crate::call::stage::place_videos(self);
+                    crate::playback::resize_full_clip(self);
                 }
                 Task::none()
             }
@@ -252,6 +254,7 @@ impl App {
                 self.fit_zoom();
                 let fitted = crate::active_now::active_now_fits(self.ctx());
                 crate::window_bar::fit_window(self);
+                crate::playback::resize_full_clip(self);
                 if crate::active_now::active_now_fits(self.ctx()) == fitted {
                     return crate::window_bar::read_window_state(self);
                 }

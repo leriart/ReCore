@@ -64,6 +64,8 @@ pub enum Message {
     /// reaction on a tab, and what's done in it.
     OpenPicker(Target, crate::picker::Tab),
     Forward(crate::forward::Event),
+    /// Help's card of the app's shortcuts.
+    Shortcuts(crate::shortcuts::Event),
     Picker(picker::Event),
     /// Text in the timeline: a press or drag on it, the button let go, a
     /// press on nothing.
