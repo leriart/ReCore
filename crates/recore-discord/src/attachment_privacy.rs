@@ -101,14 +101,19 @@ fn orientation(data: &[u8]) -> Option<u8> {
     let offset = usize::try_from(long(tiff.get(4..8)?)).ok()?;
     let table = tiff.get(offset..)?;
     let count = usize::from(short(table.get(..2)?));
-    table[2..].chunks_exact(12).take(count).find_map(|entry| {
-        if short(entry) == 0x0112 && short(&entry[2..]) == 3 && long(&entry[4..]) == 1 {
-            let value = short(&entry[8..]);
-            (2..=8).contains(&value).then_some(value as u8)
-        } else {
-            None
-        }
-    })
+    table[2..]
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .take(count)
+        .find_map(|entry| {
+            if short(entry) == 0x0112 && short(&entry[2..]) == 3 && long(&entry[4..]) == 1 {
+                let value = short(&entry[8..]);
+                (2..=8).contains(&value).then_some(value as u8)
+            } else {
+                None
+            }
+        })
 }
 
 fn orientation_tiff(value: u8) -> [u8; 26] {
@@ -245,7 +250,7 @@ fn png(data: &mut [u8]) -> Option<usize> {
             }
             b"IHDR" | b"PLTE" | b"bKGD" | b"cHRM" | b"cICP" | b"gAMA" | b"iCCP" | b"pHYs"
             | b"sBIT" | b"sRGB" | b"tRNS" | b"acTL" | b"fcTL" | b"fdAT" => {
-                keep(data, &mut write, read..end)
+                keep(data, &mut write, read..end);
             }
             _ if kind[0].is_ascii_uppercase() => return None,
             _ => {}
@@ -386,7 +391,7 @@ mod tests {
         data.extend(kind);
         data.extend(u32::try_from(contents.len()).unwrap().to_le_bytes());
         data.extend(contents);
-        if contents.len() % 2 != 0 {
+        if !contents.len().is_multiple_of(2) {
             data.push(0);
         }
     }

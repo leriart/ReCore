@@ -1269,6 +1269,10 @@ impl Discord {
     /// Who reacted to the message `id` with `emoji`, in the API's form: up
     /// to `limit`, by user id, after the user `after`, named as
     /// [`Self::people`] names them.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the API's own query names guild, channel, id, emoji, after, limit and burst"
+    )]
     pub async fn reactors(
         &self,
         guild: &str,

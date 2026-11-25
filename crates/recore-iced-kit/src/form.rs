@@ -816,6 +816,10 @@ pub fn colour_row<'a, M: Clone + 'a>(
 /// a saturation/brightness square and hue strip, so a theme's colour can be
 /// chosen without typing its hex. `open` is the owner's state; `on_open`
 /// toggles it and closes the picker when a click falls outside.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the row's theme, name, colour, hex, error, open state and three callbacks"
+)]
 pub fn colour_row_with_picker<'a, M: Clone + 'a>(
     theme: &Theme,
     name: &'a str,

@@ -13,6 +13,10 @@ use tokio_tungstenite::{
 };
 
 /// Opens a WebSocket to `request`.
+#[allow(
+    clippy::result_large_err,
+    reason = "tungstenite's error is the caller's own, at the crate's boundary"
+)]
 pub(crate) async fn connect(
     request: impl IntoClientRequest + Unpin,
 ) -> tungstenite::Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> {
