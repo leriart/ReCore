@@ -1,10 +1,11 @@
-//! The account's status as Discord's user settings keep it: online, idle, do not
-//! disturb or invisible, and a custom status; and its server list's order and
-//! folders.
+//! The settings Discord keeps for the account: the status and the game it
+//! shares, how messages draw, the theme, the language, which reactions
+//! notify, and the server list's order and folders.
 //! The settings are a protobuf message, `PreloadedUserSettings`, in base64;
-//! ReCore reads its `status` and `guild_folders` fields and writes only `status`,
-//! by hand, always whole: Discord resets what a write of it leaves out. `status`
-//! also says whether the account shares the game it plays.
+//! ReCore reads those fields and writes the status, the text and image
+//! switches, the theme and the language by hand, always whole: Discord resets
+//! what a write of a field leaves out. `status` also says whether the account
+//! shares the game it plays.
 //!
 //! Each session tells the gateway its presence, so ReCore sends the status the
 //! settings hold once connected, and again when they change.
@@ -17,16 +18,37 @@ const STATUS: u64 = 11;
 /// Voice and video settings, and in them the AFK timeout.
 const VOICE_AND_VIDEO: u64 = 5;
 const VOICE_AFK_TIMEOUT: u64 = 6;
+/// `PreloadedUserSettings.notifications`, and in it `reaction_notifications`,
+/// an enum: 0 every reaction notifies, 1 only in DMs and 2 none.
+const NOTIFICATIONS: u64 = 7;
+const REACTION_NOTIFICATIONS: u64 = 7;
+/// `PreloadedUserSettings.text_and_images`, and in it the switches that
+/// change how a message draws, each a `BoolValue`, and `view_nsfw_commands`:
+/// age-restricted commands are offered in DMs.
+const TEXT_AND_IMAGES: u64 = 6;
+const INLINE_ATTACHMENT_MEDIA: u64 = 9;
+const INLINE_EMBED_MEDIA: u64 = 10;
+const GIF_AUTO_PLAY: u64 = 11;
+const RENDER_EMBEDS: u64 = 12;
+const RENDER_REACTIONS: u64 = 13;
+const MESSAGE_DISPLAY_COMPACT: u64 = 17;
+const CONVERT_EMOTICONS: u64 = 21;
+const VIEW_NSFW_COMMANDS: u64 = 23;
+/// `PreloadedUserSettings.appearance`, and in it the theme, an enum: 1 dark,
+/// 2 light, 3 darker and 4 midnight, 0 being dark as well; and developer mode.
+const APPEARANCE: u64 = 13;
+const THEME: u64 = 1;
+const DEVELOPER_MODE: u64 = 2;
+/// `PreloadedUserSettings.localization`, and in it the locale, a
+/// `StringValue`, such as `en-US`.
+const LOCALIZATION: u64 = 12;
+const LOCALE: u64 = 1;
 /// `StatusSettings.status`, a `StringValue`, and `StatusSettings.custom_status`.
 const STATUS_STATUS: u64 = 1;
 const STATUS_CUSTOM: u64 = 2;
 /// `StatusSettings.show_current_game`, a `BoolValue`: whether the account
 /// shares the game it plays and the Rich Presence games send.
 const STATUS_SHOW_GAME: u64 = 3;
-/// `PreloadedUserSettings.text_and_images`, and in it `view_nsfw_commands`,
-/// a `BoolValue`: age-restricted commands are offered in DMs.
-const TEXT_AND_IMAGES: u64 = 6;
-const VIEW_NSFW_COMMANDS: u64 = 23;
 /// `StatusSettings.status_expires_at_ms`, a `fixed64`, and
 /// `status_created_at_ms`, a `UInt64Value`: when a status set for a while
 /// ends, and when it was set.
@@ -81,7 +103,116 @@ impl CustomStatus {
     }
 }
 
-/// What the settings say of the status. `None` where they don't say: a
+/// The theme Discord's client shows, as `appearance.theme` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+    Darker,
+    Midnight,
+}
+
+impl Theme {
+    /// The enum's value on the wire.
+    fn number(self) -> u64 {
+        match self {
+            Self::Dark => 1,
+            Self::Light => 2,
+            Self::Darker => 3,
+            Self::Midnight => 4,
+        }
+    }
+
+    /// The theme a value names; 0 is Discord's unset, which it treats as dark.
+    fn of(value: u64) -> Option<Self> {
+        match value {
+            0 | 1 => Some(Self::Dark),
+            2 => Some(Self::Light),
+            3 => Some(Self::Darker),
+            4 => Some(Self::Midnight),
+            _ => None,
+        }
+    }
+}
+
+/// Which reactions notify the account, as `notifications.reaction_notifications`
+/// names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionNotifications {
+    /// Every reaction notifies.
+    All,
+    /// Only reactions in DMs notify.
+    OnlyDirectMessages,
+    /// No reaction notifies.
+    Disabled,
+}
+
+impl ReactionNotifications {
+    /// The setting a value names.
+    fn of(value: u64) -> Option<Self> {
+        match value {
+            0 => Some(Self::All),
+            1 => Some(Self::OnlyDirectMessages),
+            2 => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+/// A switch in `text_and_images` that changes how a message draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAndImage {
+    /// Attachments show where they were uploaded.
+    InlineAttachmentMedia,
+    /// Images and videos from links show in place.
+    InlineEmbedMedia,
+    /// GIFs play as they show.
+    GifAutoPlay,
+    /// Messages' embeds, such as link previews, render.
+    RenderEmbeds,
+    /// Reactions render under messages.
+    RenderReactions,
+    /// Messages draw compactly.
+    MessageDisplayCompact,
+    /// Emoticons become emoji.
+    ConvertEmoticons,
+}
+
+impl TextAndImage {
+    /// The switch's field in `TextAndImagesSettings`.
+    fn number(self) -> u64 {
+        match self {
+            Self::InlineAttachmentMedia => INLINE_ATTACHMENT_MEDIA,
+            Self::InlineEmbedMedia => INLINE_EMBED_MEDIA,
+            Self::GifAutoPlay => GIF_AUTO_PLAY,
+            Self::RenderEmbeds => RENDER_EMBEDS,
+            Self::RenderReactions => RENDER_REACTIONS,
+            Self::MessageDisplayCompact => MESSAGE_DISPLAY_COMPACT,
+            Self::ConvertEmoticons => CONVERT_EMOTICONS,
+        }
+    }
+}
+
+/// A top-level field of `PreloadedUserSettings` that ReCore writes whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsSection {
+    TextAndImages,
+    Appearance,
+    Localization,
+}
+
+impl SettingsSection {
+    /// The section's field in `PreloadedUserSettings`.
+    fn number(self) -> u64 {
+        match self {
+            Self::TextAndImages => TEXT_AND_IMAGES,
+            Self::Appearance => APPEARANCE,
+            Self::Localization => LOCALIZATION,
+        }
+    }
+}
+
+/// What the settings say of the account. `None` where they don't say: a
 /// partial update leaves the rest as it was.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusSettings {
@@ -96,33 +227,77 @@ pub struct StatusSettings {
     pub show_game: Option<bool>,
     /// Whether apps' age-restricted commands are offered in DMs.
     pub nsfw_commands_in_dms: Option<bool>,
+    /// Whether attachments show where they were uploaded.
+    pub inline_attachment_media: Option<bool>,
+    /// Whether images and videos from links show in place.
+    pub inline_embed_media: Option<bool>,
+    /// Whether GIFs play as they show.
+    pub gif_auto_play: Option<bool>,
+    /// Whether messages' embeds, such as link previews, render.
+    pub render_embeds: Option<bool>,
+    /// Whether reactions render under messages.
+    pub render_reactions: Option<bool>,
+    /// Whether messages draw compactly.
+    pub message_display_compact: Option<bool>,
+    /// Whether emoticons become emoji.
+    pub convert_emoticons: Option<bool>,
+    /// The theme Discord's client shows.
+    pub theme: Option<Theme>,
+    /// Whether Discord's client offers its developer tools.
+    pub developer_mode: Option<bool>,
+    /// The language Discord's client shows, such as `en-US`.
+    pub locale: Option<String>,
+    /// Which reactions notify the account.
+    pub reaction_notifications: Option<ReactionNotifications>,
 }
 
-/// The status in base64 settings, as READY's `user_settings_proto` or a
+/// The settings in base64, as READY's `user_settings_proto` or a
 /// USER_SETTINGS_PROTO_UPDATE carries them.
 pub fn read(encoded: &str) -> StatusSettings {
     let Ok(data) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
         return StatusSettings::default();
     };
-    // A UInt32Value: the number in its field 1.
-    let afk_timeout = message(&data, VOICE_AND_VIDEO)
-        .and_then(|voice| message(voice, VOICE_AFK_TIMEOUT))
-        .map(|wrapper| {
-            fields(wrapper)
-                .find_map(|(number, value)| match value {
-                    Field::Varint(seconds) if number == 1 => Some(seconds),
-                    _ => None,
-                })
-                .unwrap_or(0)
-        });
-    let nsfw_commands_in_dms = message(&data, TEXT_AND_IMAGES)
-        .and_then(|text| message(text, VIEW_NSFW_COMMANDS))
-        .map(bool_value);
+    // A UInt32Value: the number in its field 1, 0 when it's left out.
     let mut settings = StatusSettings {
-        afk_timeout,
-        nsfw_commands_in_dms,
+        afk_timeout: message(&data, VOICE_AND_VIDEO)
+            .and_then(|voice| message(voice, VOICE_AFK_TIMEOUT))
+            .map(wrapped_varint),
         ..StatusSettings::default()
     };
+    if let Some(text) = message(&data, TEXT_AND_IMAGES) {
+        let switch = |number| message(text, number).map(bool_value);
+        settings.inline_attachment_media = switch(INLINE_ATTACHMENT_MEDIA);
+        settings.inline_embed_media = switch(INLINE_EMBED_MEDIA);
+        settings.gif_auto_play = switch(GIF_AUTO_PLAY);
+        settings.render_embeds = switch(RENDER_EMBEDS);
+        settings.render_reactions = switch(RENDER_REACTIONS);
+        settings.message_display_compact = switch(MESSAGE_DISPLAY_COMPACT);
+        settings.convert_emoticons = switch(CONVERT_EMOTICONS);
+        settings.nsfw_commands_in_dms = switch(VIEW_NSFW_COMMANDS);
+    }
+    if let Some(appearance) = message(&data, APPEARANCE) {
+        settings.theme = appearance_theme(appearance);
+        settings.developer_mode = Some(fields(appearance).any(|(number, value)| {
+            number == DEVELOPER_MODE && matches!(value, Field::Varint(on) if on != 0)
+        }));
+    }
+    if let Some(localization) = message(&data, LOCALIZATION) {
+        settings.locale = message(localization, LOCALE)
+            .map(string_value)
+            .filter(|locale| !locale.is_empty());
+    }
+    if let Some(notifications) = message(&data, NOTIFICATIONS) {
+        // An enum leaves out its 0: a section without the field says
+        // every reaction notifies.
+        settings.reaction_notifications = match fields(notifications)
+            .filter(|(number, _)| *number == REACTION_NOTIFICATIONS)
+            .last()
+        {
+            None => Some(ReactionNotifications::All),
+            Some((_, Field::Varint(level))) => ReactionNotifications::of(level),
+            Some(_) => None,
+        };
+    }
     let Some(status) = message(&data, STATUS) else {
         return settings;
     };
@@ -167,6 +342,28 @@ pub fn read(encoded: &str) -> StatusSettings {
         }
     }
     settings
+}
+
+/// The theme `appearance` names, dark when it leaves it out, as its 0 does.
+fn appearance_theme(appearance: &[u8]) -> Option<Theme> {
+    match fields(appearance)
+        .filter(|(number, _)| *number == THEME)
+        .last()
+    {
+        None => Some(Theme::Dark),
+        Some((_, Field::Varint(theme))) => Theme::of(theme),
+        Some(_) => None,
+    }
+}
+
+/// A `StringValue`'s text, empty when it leaves it out.
+fn string_value(wrapper: &[u8]) -> String {
+    fields(wrapper)
+        .find_map(|(number, value)| match value {
+            Field::Bytes(text) if number == 1 => Some(String::from_utf8_lossy(text).into_owned()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// A `BoolValue`'s value, which leaves out a false one.
@@ -297,7 +494,8 @@ pub fn write_server_list(entries: &[Folder]) -> String {
         let packed: Vec<u8> = entry
             .servers
             .iter()
-            .flat_map(|id| id.parse::<u64>().unwrap().to_le_bytes())
+            .filter_map(|id| id.parse::<u64>().ok())
+            .flat_map(u64::to_le_bytes)
             .collect();
         let mut folder = Vec::new();
         put_bytes(&mut folder, FOLDER_GUILDS, &packed);
@@ -342,35 +540,59 @@ fn fixed64s(value: Field<'_>) -> Vec<u64> {
 /// The settings' `status` as they hold it, its bytes, when they have one:
 /// what a write of it starts from.
 pub fn status_field(encoded: &str) -> Option<Vec<u8>> {
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    message(&data, STATUS).map(<[u8]>::to_vec)
+    submessage(encoded, STATUS)
 }
 
 /// Base64 settings holding `status` alone, as a PATCH sends them: Discord
 /// puts each top-level field it carries in place of the old one, and resets
 /// what that field leaves out, so `status` always goes whole.
 pub fn encode_status(status: &[u8]) -> String {
+    encode_message(STATUS, status)
+}
+
+/// The settings' field `section` as they hold it, its bytes, when they have
+/// it: what a write of it starts from.
+pub fn section_field(encoded: &str, section: SettingsSection) -> Option<Vec<u8>> {
+    submessage(encoded, section.number())
+}
+
+/// Base64 settings holding `section` alone, as a PATCH sends them: it goes
+/// whole, as [`encode_status`] does.
+pub fn encode_section(section: SettingsSection, bytes: &[u8]) -> String {
+    encode_message(section.number(), bytes)
+}
+
+/// The settings' field `number` as they hold it, its bytes, when they have
+/// it.
+fn submessage(encoded: &str, number: u64) -> Option<Vec<u8>> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    message(&data, number).map(<[u8]>::to_vec)
+}
+
+/// Base64 settings holding only the field `number`, a message.
+fn encode_message(number: u64, bytes: &[u8]) -> String {
     let mut settings = Vec::new();
-    put_bytes(&mut settings, STATUS, status);
+    put_bytes(&mut settings, number, bytes);
     base64::engine::general_purpose::STANDARD.encode(settings)
 }
 
-/// `current`, the settings' `status`, with its field `number` set to
-/// `value`, or left out with `None`, and the fields in `stale` taken out;
-/// the rest as it was, unknown fields too, as Discord's client keeps them.
-fn with_status_field(current: &[u8], number: u64, value: Option<&[u8]>, stale: &[u64]) -> Vec<u8> {
-    let mut status = Vec::new();
+/// `current`, a message of the settings such as `status`, with its field
+/// `number` set to `value`, or left out with `None`, and the fields in
+/// `stale` taken out; the rest as it was, unknown fields too, as Discord's
+/// client keeps them.
+fn with_field(current: &[u8], number: u64, value: Option<Field<'_>>, stale: &[u64]) -> Vec<u8> {
+    let mut message = Vec::new();
     for (field, kept) in fields(current) {
         if field != number && !stale.contains(&field) {
-            put_field(&mut status, field, &kept);
+            put_field(&mut message, field, &kept);
         }
     }
     if let Some(value) = value {
-        put_bytes(&mut status, number, value);
+        put_field(&mut message, number, &value);
     }
-    status
+    message
 }
 
 /// `current`, the settings' `status`, with the custom status set, or left
@@ -396,7 +618,12 @@ pub fn write_custom(current: &[u8], custom: Option<&CustomStatus>, now_ms: u64) 
         put_fixed64(&mut message, CUSTOM_CREATED, now_ms);
         message
     });
-    with_status_field(current, STATUS_CUSTOM, message.as_deref(), &[])
+    with_field(
+        current,
+        STATUS_CUSTOM,
+        message.as_deref().map(Field::Bytes),
+        &[],
+    )
 }
 
 /// `current`, the settings' `status`, with the status set: `online`,
@@ -420,13 +647,13 @@ pub fn write_status(current: &[u8], status: &str, now_ms: u64) -> Vec<u8> {
             created
         }
     };
-    let status = with_status_field(
+    let status = with_field(
         current,
         STATUS_STATUS,
-        Some(&wrapper),
+        Some(Field::Bytes(&wrapper)),
         &[STATUS_EXPIRES, STATUS_CREATED],
     );
-    with_status_field(&status, STATUS_CREATED, Some(&created), &[])
+    with_field(&status, STATUS_CREATED, Some(Field::Bytes(&created)), &[])
 }
 
 /// The status `status`, the settings' field, holds, if any.
@@ -452,7 +679,32 @@ pub fn write_show_game(current: &[u8], shown: bool) -> Vec<u8> {
         put_varint(&mut wrapper, 1 << 3 | VARINT);
         put_varint(&mut wrapper, 1);
     }
-    with_status_field(current, STATUS_SHOW_GAME, Some(&wrapper), &[])
+    with_field(current, STATUS_SHOW_GAME, Some(Field::Bytes(&wrapper)), &[])
+}
+
+/// `current`, the settings' `text_and_images`, with a switch that changes
+/// how messages draw set to `on`. The rest of the section stays as it was.
+pub fn write_text_and_image(current: &[u8], switch: TextAndImage, on: bool) -> Vec<u8> {
+    let mut wrapper = Vec::new();
+    if on {
+        put_varint(&mut wrapper, 1 << 3 | VARINT);
+        put_varint(&mut wrapper, 1);
+    }
+    with_field(current, switch.number(), Some(Field::Bytes(&wrapper)), &[])
+}
+
+/// `current`, the settings' `appearance`, with the theme set. The rest of
+/// the section stays as it was.
+pub fn write_theme(current: &[u8], theme: Theme) -> Vec<u8> {
+    with_field(current, THEME, Some(Field::Varint(theme.number())), &[])
+}
+
+/// `current`, the settings' `localization`, with the locale set, such as
+/// `en-US`. The rest of the section stays as it was.
+pub fn write_locale(current: &[u8], locale: &str) -> Vec<u8> {
+    let mut wrapper = Vec::new();
+    put_bytes(&mut wrapper, 1, locale.as_bytes());
+    with_field(current, LOCALE, Some(Field::Bytes(&wrapper)), &[])
 }
 
 /// The presence a session sends the gateway, in IDENTIFY or opcode 3: the
@@ -676,9 +928,7 @@ mod tests {
             StatusSettings {
                 status: None,
                 custom: Some(Some(status)),
-                afk_timeout: None,
-                show_game: None,
-                nsfw_commands_in_dms: None,
+                ..StatusSettings::default()
             }
         );
         assert_eq!(read(&custom_only(None)).custom, Some(None));
@@ -687,9 +937,7 @@ mod tests {
             StatusSettings {
                 status: Some("idle".into()),
                 custom: Some(None),
-                afk_timeout: None,
-                show_game: None,
-                nsfw_commands_in_dms: None,
+                ..StatusSettings::default()
             },
             "the status comes whole: none in it is none"
         );
@@ -741,9 +989,7 @@ mod tests {
         let expected = StatusSettings {
             status: Some("dnd".into()),
             custom: Some(Some(custom)),
-            afk_timeout: None,
-            show_game: None,
-            nsfw_commands_in_dms: None,
+            ..StatusSettings::default()
         };
         assert_eq!(read(&encode_status(&written)), expected);
         let data = base64::engine::general_purpose::STANDARD
@@ -939,5 +1185,309 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(settings);
         assert_eq!(read(&encoded).afk_timeout, Some(300));
         assert_eq!(read(&status_only("dnd")).afk_timeout, None);
+    }
+
+    /// A `BoolValue` holding `on`; false goes as an empty one, as Discord
+    /// writes it.
+    fn bool_wrapper(on: bool) -> Vec<u8> {
+        let mut wrapper = Vec::new();
+        if on {
+            put_varint(&mut wrapper, 1 << 3 | VARINT);
+            put_varint(&mut wrapper, 1);
+        }
+        wrapper
+    }
+
+    #[test]
+    fn reads_and_writes_the_text_and_image_switches() {
+        const SWITCHES: [TextAndImage; 7] = [
+            TextAndImage::InlineAttachmentMedia,
+            TextAndImage::InlineEmbedMedia,
+            TextAndImage::GifAutoPlay,
+            TextAndImage::RenderEmbeds,
+            TextAndImage::RenderReactions,
+            TextAndImage::MessageDisplayCompact,
+            TextAndImage::ConvertEmoticons,
+        ];
+        let value = |settings: &StatusSettings, switch| match switch {
+            TextAndImage::InlineAttachmentMedia => settings.inline_attachment_media,
+            TextAndImage::InlineEmbedMedia => settings.inline_embed_media,
+            TextAndImage::GifAutoPlay => settings.gif_auto_play,
+            TextAndImage::RenderEmbeds => settings.render_embeds,
+            TextAndImage::RenderReactions => settings.render_reactions,
+            TextAndImage::MessageDisplayCompact => settings.message_display_compact,
+            TextAndImage::ConvertEmoticons => settings.convert_emoticons,
+        };
+        let encode = |switch, on| {
+            encode_section(
+                SettingsSection::TextAndImages,
+                &write_text_and_image(&[], switch, on),
+            )
+        };
+        for switch in SWITCHES {
+            assert_eq!(value(&read(&encode(switch, true)), switch), Some(true));
+            assert_eq!(value(&read(&encode(switch, false)), switch), Some(false));
+        }
+        let untouched = read(&status_only("idle"));
+        for switch in SWITCHES {
+            assert_eq!(value(&untouched, switch), None, "the settings don't say");
+        }
+    }
+
+    #[test]
+    fn a_text_and_image_write_keeps_the_rest_of_the_section() {
+        let mut current = Vec::new();
+        put_bytes(&mut current, INLINE_EMBED_MEDIA, &bool_wrapper(true));
+        put_bytes(&mut current, 30, b"kept");
+        let written = write_text_and_image(&current, TextAndImage::RenderReactions, false);
+        let settings = read(&encode_section(SettingsSection::TextAndImages, &written));
+        assert_eq!(settings.inline_embed_media, Some(true));
+        assert_eq!(settings.render_reactions, Some(false));
+        assert!(
+            fields(&written).any(|(number, _)| number == 30),
+            "unknown fields stay, as the client keeps them"
+        );
+    }
+
+    #[test]
+    fn reads_and_writes_the_theme_and_developer_mode() {
+        for theme in [Theme::Dark, Theme::Light, Theme::Darker, Theme::Midnight] {
+            let encoded = encode_section(SettingsSection::Appearance, &write_theme(&[], theme));
+            assert_eq!(read(&encoded).theme, Some(theme));
+        }
+        let mut appearance = Vec::new();
+        put_varint(&mut appearance, THEME << 3 | VARINT);
+        put_varint(&mut appearance, 3);
+        put_varint(&mut appearance, DEVELOPER_MODE << 3 | VARINT);
+        put_varint(&mut appearance, 1);
+        let settings = read(&encode_section(SettingsSection::Appearance, &appearance));
+        assert_eq!(settings.theme, Some(Theme::Darker));
+        assert_eq!(settings.developer_mode, Some(true));
+
+        // A section without a theme is dark, as its 0 is; an appearance
+        // without developer mode has it off.
+        let mut appearance = Vec::new();
+        put_varint(&mut appearance, DEVELOPER_MODE << 3 | VARINT);
+        put_varint(&mut appearance, 0);
+        let settings = read(&encode_section(SettingsSection::Appearance, &appearance));
+        assert_eq!(settings.theme, Some(Theme::Dark));
+        assert_eq!(settings.developer_mode, Some(false));
+        assert_eq!(read(&status_only("idle")).theme, None);
+
+        // A write keeps the fields it doesn't set.
+        let written = write_theme(&appearance, Theme::Midnight);
+        let settings = read(&encode_section(SettingsSection::Appearance, &written));
+        assert_eq!(settings.theme, Some(Theme::Midnight));
+        assert_eq!(settings.developer_mode, Some(false));
+    }
+
+    #[test]
+    fn reads_and_writes_the_locale() {
+        let encoded = encode_section(SettingsSection::Localization, &write_locale(&[], "de-DE"));
+        assert_eq!(read(&encoded).locale.as_deref(), Some("de-DE"));
+
+        let mut localization = write_locale(&[], "en-US");
+        put_bytes(&mut localization, 9, b"kept");
+        let written = write_locale(&localization, "fr");
+        assert_eq!(
+            read(&encode_section(SettingsSection::Localization, &written))
+                .locale
+                .as_deref(),
+            Some("fr")
+        );
+        assert!(fields(&written).any(|(number, _)| number == 9));
+        assert_eq!(read(&status_only("idle")).locale, None);
+    }
+
+    #[test]
+    fn reads_which_reactions_notify() {
+        let encoded = |level: Option<u64>| {
+            let mut notifications = Vec::new();
+            if let Some(level) = level {
+                put_varint(&mut notifications, REACTION_NOTIFICATIONS << 3 | VARINT);
+                put_varint(&mut notifications, level);
+            }
+            let mut settings = Vec::new();
+            put_bytes(&mut settings, NOTIFICATIONS, &notifications);
+            base64::engine::general_purpose::STANDARD.encode(settings)
+        };
+        assert_eq!(
+            read(&encoded(Some(0))).reaction_notifications,
+            Some(ReactionNotifications::All)
+        );
+        assert_eq!(
+            read(&encoded(Some(1))).reaction_notifications,
+            Some(ReactionNotifications::OnlyDirectMessages)
+        );
+        assert_eq!(
+            read(&encoded(Some(2))).reaction_notifications,
+            Some(ReactionNotifications::Disabled)
+        );
+        assert_eq!(
+            read(&encoded(None)).reaction_notifications,
+            Some(ReactionNotifications::All),
+            "an enum leaves out its 0"
+        );
+        assert_eq!(read(&status_only("idle")).reaction_notifications, None);
+    }
+
+    #[test]
+    fn reads_the_settings_whole() {
+        let mut text = Vec::new();
+        for switch in [
+            INLINE_ATTACHMENT_MEDIA,
+            INLINE_EMBED_MEDIA,
+            GIF_AUTO_PLAY,
+            RENDER_EMBEDS,
+            RENDER_REACTIONS,
+            MESSAGE_DISPLAY_COMPACT,
+            CONVERT_EMOTICONS,
+            VIEW_NSFW_COMMANDS,
+        ] {
+            put_bytes(
+                &mut text,
+                switch,
+                &bool_wrapper(switch != CONVERT_EMOTICONS),
+            );
+        }
+        let mut appearance = Vec::new();
+        put_varint(&mut appearance, THEME << 3 | VARINT);
+        put_varint(&mut appearance, 4);
+        put_varint(&mut appearance, DEVELOPER_MODE << 3 | VARINT);
+        put_varint(&mut appearance, 1);
+        let mut localization = Vec::new();
+        put_bytes(&mut localization, LOCALE, b"\x0a\x05en-GB");
+        let mut notifications = Vec::new();
+        put_varint(&mut notifications, REACTION_NOTIFICATIONS << 3 | VARINT);
+        put_varint(&mut notifications, 2);
+        let mut voice = Vec::new();
+        let mut timeout = Vec::new();
+        put_varint(&mut timeout, 1 << 3 | VARINT);
+        put_varint(&mut timeout, 120);
+        put_bytes(&mut voice, VOICE_AFK_TIMEOUT, &timeout);
+        let mut settings = Vec::new();
+        put_bytes(&mut settings, TEXT_AND_IMAGES, &text);
+        put_bytes(&mut settings, APPEARANCE, &appearance);
+        put_bytes(&mut settings, LOCALIZATION, &localization);
+        put_bytes(&mut settings, NOTIFICATIONS, &notifications);
+        put_bytes(&mut settings, VOICE_AND_VIDEO, &voice);
+        let read = read(&base64::engine::general_purpose::STANDARD.encode(settings));
+        assert_eq!(
+            read,
+            StatusSettings {
+                inline_attachment_media: Some(true),
+                inline_embed_media: Some(true),
+                gif_auto_play: Some(true),
+                render_embeds: Some(true),
+                render_reactions: Some(true),
+                message_display_compact: Some(true),
+                convert_emoticons: Some(false),
+                nsfw_commands_in_dms: Some(true),
+                theme: Some(Theme::Midnight),
+                developer_mode: Some(true),
+                locale: Some("en-GB".into()),
+                reaction_notifications: Some(ReactionNotifications::Disabled),
+                afk_timeout: Some(120),
+                ..StatusSettings::default()
+            }
+        );
+    }
+
+    #[test]
+    fn reads_the_documented_field_numbers() {
+        // The numbers come from Discord's PreloadedUserSettings.proto; this
+        // holds the constants to them, so a wrong one reads another setting.
+        let mut text = Vec::new();
+        put_bytes(&mut text, 9, &bool_wrapper(true)); // inline_attachment_media
+        put_bytes(&mut text, 10, &bool_wrapper(true)); // inline_embed_media
+        put_bytes(&mut text, 11, &bool_wrapper(true)); // gif_auto_play
+        put_bytes(&mut text, 12, &bool_wrapper(true)); // render_embeds
+        put_bytes(&mut text, 13, &bool_wrapper(true)); // render_reactions
+        put_bytes(&mut text, 17, &bool_wrapper(true)); // message_display_compact
+        put_bytes(&mut text, 21, &bool_wrapper(false)); // convert_emoticons
+        put_bytes(&mut text, 23, &bool_wrapper(true)); // view_nsfw_commands
+        let mut appearance = Vec::new();
+        put_varint(&mut appearance, 1 << 3 | VARINT); // theme
+        put_varint(&mut appearance, 2); // light
+        put_varint(&mut appearance, 2 << 3 | VARINT); // developer_mode
+        put_varint(&mut appearance, 1);
+        let mut localization = Vec::new();
+        put_bytes(&mut localization, 1, b"\x0a\x05en-US"); // locale
+        let mut notifications = Vec::new();
+        put_varint(&mut notifications, 7 << 3 | VARINT); // reaction_notifications
+        put_varint(&mut notifications, 1); // only DMs
+        let mut settings = Vec::new();
+        put_bytes(&mut settings, 6, &text); // text_and_images
+        put_bytes(&mut settings, 13, &appearance); // appearance
+        put_bytes(&mut settings, 12, &localization); // localization
+        put_bytes(&mut settings, 7, &notifications); // notifications
+        let read = read(&base64::engine::general_purpose::STANDARD.encode(settings));
+        assert_eq!(
+            read,
+            StatusSettings {
+                inline_attachment_media: Some(true),
+                inline_embed_media: Some(true),
+                gif_auto_play: Some(true),
+                render_embeds: Some(true),
+                render_reactions: Some(true),
+                message_display_compact: Some(true),
+                convert_emoticons: Some(false),
+                nsfw_commands_in_dms: Some(true),
+                theme: Some(Theme::Light),
+                developer_mode: Some(true),
+                locale: Some("en-US".into()),
+                reaction_notifications: Some(ReactionNotifications::OnlyDirectMessages),
+                ..StatusSettings::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_section_field_is_what_a_write_of_it_starts_from() {
+        let mut settings = Vec::new();
+        put_bytes(&mut settings, TEXT_AND_IMAGES, b"\x0a\x01x");
+        put_bytes(&mut settings, APPEARANCE, b"\x08\x01");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(settings);
+        assert_eq!(
+            section_field(&encoded, SettingsSection::TextAndImages),
+            Some(b"\x0a\x01x".to_vec())
+        );
+        assert_eq!(
+            section_field(&encoded, SettingsSection::Appearance),
+            Some(b"\x08\x01".to_vec())
+        );
+        assert_eq!(section_field(&encoded, SettingsSection::Localization), None);
+
+        // A PATCH carries the one section, whole.
+        let patch = encode_section(SettingsSection::Localization, b"\x0a\x05en-GB");
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(patch)
+            .unwrap();
+        assert_eq!(
+            fields(&data).map(|(number, _)| number).collect::<Vec<_>>(),
+            [LOCALIZATION]
+        );
+    }
+
+    #[test]
+    fn a_server_list_with_a_bad_id_writes_what_it_can() {
+        // A folder's and a server's ids come from Discord, and none may
+        // panic a write.
+        let written = write_server_list(&[
+            Folder {
+                id: "not a number".into(),
+                servers: vec!["10".into(), "also not".into()],
+                ..Folder::default()
+            },
+            Folder {
+                id: "7".into(),
+                servers: vec!["20".into()],
+                ..Folder::default()
+            },
+        ]);
+        let list = server_list(&written).unwrap();
+        assert_eq!(list.order, ["10", "20"]);
+        assert_eq!(list.folders.len(), 1);
+        assert_eq!(list.folders[0].id, "7");
     }
 }
