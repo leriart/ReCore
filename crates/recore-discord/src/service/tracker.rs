@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use super::{
     Account, BlockedUser, Conversation, DO_NOT_DISTURB, Friend, FriendRequest, Live, Preview,
-    Snapshot, StageInstance, Status, VoiceMember, VoiceServer, marks::Published, now_ms, server,
+    ServerSettings, Snapshot, StageInstance, Status, VoiceMember, VoiceServer, marks::Published,
+    now_ms, server,
 };
 use crate::{
     activity::{self, Activities},
@@ -20,6 +21,7 @@ use crate::{
     member_list::{self, ListedMember, Presence},
     message::{Message, Names},
     ready::{self, PRIVATE, Private, Server},
+    server_settings::{self, Invite},
     settings::{self, CustomStatus},
     stream::{self, StreamServer},
     unread::Unreads,
@@ -31,6 +33,10 @@ const FRIEND: u64 = 1;
 const BLOCKED: u64 = 2;
 const INCOMING_REQUEST: u64 = 3;
 const OUTGOING_REQUEST: u64 = 4;
+
+/// Discord's invite flag for an invite that skips join applications, the
+/// same bit as in [`server_settings`].
+const INVITE_BYPASS: u64 = 1 << 3;
 
 /// The lists of people the last snapshot gave, each kept with a fingerprint
 /// of what made it.
@@ -145,6 +151,12 @@ pub(super) struct Tracker {
     calls: HashMap<String, Vec<String>>,
     /// This account's roles, by server id.
     my_roles: HashMap<String, Vec<String>>,
+    /// Each channel's pinned messages, by channel id, as Discord last gave
+    /// them: shared with snapshots while they stay the same.
+    pins: Arc<HashMap<String, Arc<Vec<Message>>>>,
+    /// Each server's settings, by server id: shared with snapshots while
+    /// they stay the same.
+    server_settings: Arc<HashMap<String, ServerSettings>>,
     pub(super) unreads: Unreads,
     /// DMs and group DMs.
     private: Vec<Private>,
@@ -247,6 +259,8 @@ impl Tracker {
             stage_instances: Arc::default(),
             calls: HashMap::new(),
             my_roles: HashMap::new(),
+            pins: Arc::default(),
+            server_settings: Arc::default(),
             unreads: Unreads::from_ready(ready),
             private: Vec::new(),
             presences: HashMap::new(),
@@ -566,6 +580,37 @@ impl Tracker {
                 server.put_event(scheduled, *event == Event::GuildScheduledEventDelete);
                 true
             }
+            // Someone subscribed to a scheduled event, or unsubscribed: the
+            // count of those interested follows.
+            Event::GuildScheduledEventUserAdd | Event::GuildScheduledEventUserRemove => {
+                // An exception's subscribers are counted apart, and ReCore
+                // shows only the event's.
+                if data
+                    .get("guild_scheduled_event_exception_id")
+                    .is_some_and(|id| !id.is_null())
+                {
+                    return false;
+                }
+                let (Some(guild), Some(id)) = (
+                    data["guild_id"].as_str(),
+                    data["guild_scheduled_event_id"].as_str(),
+                ) else {
+                    return false;
+                };
+                let Some(server) = self.server_mut(guild) else {
+                    return false;
+                };
+                let events = Arc::make_mut(&mut server.events);
+                let Some(scheduled) = events.iter_mut().find(|event| event.id == id) else {
+                    return false;
+                };
+                if *event == Event::GuildScheduledEventUserAdd {
+                    scheduled.interested += 1;
+                } else {
+                    scheduled.interested = scheduled.interested.saturating_sub(1);
+                }
+                true
+            }
             Event::GuildEmojisUpdate => {
                 let Some(server) = data["guild_id"]
                     .as_str()
@@ -586,6 +631,68 @@ impl Tracker {
                 };
                 server.stickers =
                     std::sync::Arc::new(crate::stickers::parse_all(&data["stickers"]));
+                true
+            }
+            // A server's AutoMod rule was made, changed or went. The rule
+            // itself comes with the event, so the page shows it without
+            // asking the server again.
+            Event::AutoModerationRuleCreate
+            | Event::AutoModerationRuleUpdate
+            | Event::AutoModerationRuleDelete => {
+                // Discord sends the rule itself; the fake nests it under
+                // `rule`.
+                let rule = data.get("rule").unwrap_or(data);
+                let (Some(guild), Some(rule)) = (
+                    data["guild_id"]
+                        .as_str()
+                        .or_else(|| rule["guild_id"].as_str()),
+                    server_settings::parse_rule(rule),
+                ) else {
+                    return false;
+                };
+                let deleted = *event == Event::AutoModerationRuleDelete;
+                let settings = self.settings_mut(guild);
+                let rules = Arc::make_mut(&mut settings.automod);
+                let before = rules.clone();
+                rules.retain(|known| known.id != rule.id);
+                if !deleted {
+                    rules.push(rule);
+                }
+                *rules != before
+            }
+            // An invite to a server was made or went.
+            Event::InviteCreate => {
+                let (Some(guild), Some(code)) = (data["guild_id"].as_str(), data["code"].as_str())
+                else {
+                    return false;
+                };
+                let invite = self.invite(guild, code, data);
+                let settings = self.settings_mut(guild);
+                let invites = Arc::make_mut(&mut settings.invites);
+                let before = invites.clone();
+                invites.retain(|known| known.code != code);
+                invites.push(invite);
+                *invites != before
+            }
+            Event::InviteDelete => {
+                let (Some(guild), Some(code)) = (data["guild_id"].as_str(), data["code"].as_str())
+                else {
+                    return false;
+                };
+                let settings = self.settings_mut(guild);
+                let invites = Arc::make_mut(&mut settings.invites);
+                let before = invites.len();
+                invites.retain(|known| known.code != code);
+                invites.len() != before
+            }
+            // A server's integrations or webhooks changed. Discord names
+            // only the server, so its page asks for them again.
+            Event::GuildIntegrationsUpdate | Event::WebhooksUpdate => {
+                let Some(guild) = data["guild_id"].as_str() else {
+                    return false;
+                };
+                let settings = self.settings_mut(guild);
+                settings.changes += 1;
                 true
             }
             // Carries the server's own fields, without its channels or members.
@@ -769,6 +876,29 @@ impl Tracker {
                     server.put_channel(data);
                 }
                 true
+            }
+            // A channel's pins changed. Discord sends the pinned messages
+            // with the event when it has them; without them, what it has
+            // is asked for again.
+            Event::ChannelPinsUpdate => {
+                let Some(channel) = data["channel_id"].as_str() else {
+                    return false;
+                };
+                let Some(pins) = data["pins"].as_array() else {
+                    return Arc::make_mut(&mut self.pins).remove(channel).is_some();
+                };
+                let guild = data["guild_id"].as_str();
+                let mut names = self.write_names();
+                let pinned: Vec<Message> = pins
+                    .iter()
+                    .filter_map(|pin| {
+                        names.learn_message(guild, pin);
+                        crate::message::parse(pin)
+                    })
+                    .collect();
+                drop(names);
+                let pins = Arc::new(pinned);
+                Arc::make_mut(&mut self.pins).insert(channel.to_owned(), pins.clone()) != Some(pins)
             }
             Event::StageInstanceCreate | Event::StageInstanceUpdate => {
                 self.put_stage_instance(data)
@@ -1103,6 +1233,43 @@ impl Tracker {
             }
             _ => false,
         }
+    }
+
+    /// An invite as an INVITE_CREATE gives it: the channel by id, the
+    /// roles by id, and when it ends.
+    fn invite(&self, guild: &str, code: &str, data: &Value) -> Invite {
+        let channel = data["channel_id"].as_str().and_then(|id| {
+            self.servers
+                .iter()
+                .find(|server| server.id == guild)
+                .and_then(|server| server.channel_name(id))
+                .map(|name| (id.to_owned(), name.to_owned()))
+        });
+        Invite {
+            code: code.to_owned(),
+            inviter: server_settings::parse_banned_user(&data["inviter"]),
+            channel,
+            uses: data["uses"].as_u64().unwrap_or_default(),
+            max_uses: data["max_uses"].as_u64().unwrap_or_default(),
+            expires: data["expires_at"]
+                .as_str()
+                .and_then(crate::message::iso_ms)
+                .map(|ms| ms / 1000),
+            roles: data["role_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|role| role.as_str().map(str::to_owned))
+                .collect(),
+            bypass: data["flags"].as_u64().unwrap_or_default() & INVITE_BYPASS != 0,
+        }
+    }
+
+    /// A server's settings, to change.
+    fn settings_mut(&mut self, guild: &str) -> &mut ServerSettings {
+        Arc::make_mut(&mut self.server_settings)
+            .entry(guild.to_owned())
+            .or_default()
     }
 
     /// Where a call or stream this account is in went, from a server update
@@ -2144,6 +2311,8 @@ impl Tracker {
             voice,
             voice_started: self.voice_started.clone(),
             stage_instances: self.stage_instances.clone(),
+            pins: self.pins.clone(),
+            server_settings: self.server_settings.clone(),
             listed: None,
             viewing: self.viewing.iter().chain(&self.beside).cloned().collect(),
             names: super::SharedNames::new(self.names.clone()),
