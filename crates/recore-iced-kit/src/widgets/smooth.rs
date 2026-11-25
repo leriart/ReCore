@@ -76,6 +76,7 @@ pub fn scroll_view<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> ScrollView<
             down: true,
             anchored: false,
             bar: Some(Scroller::default()),
+            on_vertical_viewport: None,
         },
     }
 }
@@ -89,7 +90,7 @@ fn no_bar() -> scrollable::Scrollbar {
 /// A [`scroll_view`] being built.
 pub struct ScrollView<'a, M> {
     inner: Scrollable<'a, M>,
-    smooth: Smooth,
+    smooth: Smooth<M>,
 }
 
 impl<'a, M> ScrollView<'a, M> {
@@ -127,6 +128,13 @@ impl<'a, M> ScrollView<'a, M> {
         self
     }
 
+    /// Reports the drawn vertical offset from the top and the viewport
+    /// height, including when the contents fit and iced's on_scroll is silent.
+    pub fn on_vertical_viewport(mut self, on: fn(f32, f32) -> M) -> Self {
+        self.smooth.on_vertical_viewport = Some(on);
+        self
+    }
+
     /// Scrolls across, not down.
     pub fn across(mut self) -> Self {
         self.smooth.across = true;
@@ -153,13 +161,14 @@ impl<'a, M: 'a> From<ScrollView<'a, M>> for Element<'a, M> {
 }
 
 /// Round a scrollable: its motion.
-struct Smooth {
+struct Smooth<M> {
     across: bool,
     down: bool,
     /// Held to its foot, so iced counts its offset from there.
     anchored: bool,
     /// Its bar's inks; `None` for a list without one.
     bar: Option<Scroller>,
+    on_vertical_viewport: Option<fn(f32, f32) -> M>,
 }
 
 #[derive(Default)]
@@ -169,6 +178,7 @@ pub struct SmoothState {
     shift: bool,
     bar: bar::BarState,
     last_move: Option<Instant>,
+    vertical_viewport: Option<(f32, f32)>,
 }
 
 /// What the touchpad does, told from its events: iced hands on a wheel's
@@ -213,14 +223,10 @@ fn view_delta(delta: mouse::ScrollDelta, shift: bool) -> Vector {
     }
 }
 
-impl Smooth {
+impl<M> Smooth<M> {
     /// Runs `step` with the scrollable's room and moves it as far as
     /// `step` says.
-    fn drive<M>(
-        &self,
-        child: &mut Inner<'_, '_, M>,
-        step: &mut (dyn FnMut(Rooms) -> Vector + Send),
-    ) {
+    fn drive(&self, child: &mut Inner<'_, '_, M>, step: &mut (dyn FnMut(Rooms) -> Vector + Send)) {
         child.operate(&mut Drive {
             smooth: self,
             step,
@@ -228,7 +234,7 @@ impl Smooth {
         });
     }
 
-    fn rooms<M>(&self, child: &mut Inner<'_, '_, M>) -> Rooms {
+    fn rooms(&self, child: &mut Inner<'_, '_, M>) -> Rooms {
         let mut rooms = Rooms::default();
         self.drive(child, &mut |found| {
             rooms = found;
@@ -237,7 +243,7 @@ impl Smooth {
         rooms
     }
 
-    fn move_by<M>(&self, child: &mut Inner<'_, '_, M>, by: Vector) {
+    fn move_by(&self, child: &mut Inner<'_, '_, M>, by: Vector) {
         if by != Vector::ZERO {
             self.drive(child, &mut |_| by);
         }
@@ -246,7 +252,7 @@ impl Smooth {
     /// A wheel event: to the list first while it moves under the
     /// fingers or the pointer stays where it scrolled, else to what it
     /// holds first, and to the list if nothing there took it.
-    fn wheel<M>(
+    fn wheel(
         &self,
         state: &mut SmoothState,
         phase: Phase,
@@ -308,12 +314,12 @@ impl Smooth {
     }
 }
 
-impl Smooth {
+impl<M> Smooth<M> {
     /// The bar's part in an event: the pointer over the list's edge
     /// thickens it, a press there takes its thumb, and the thumb follows
     /// the pointer until the button lifts. True when the event was the
     /// bar's alone.
-    fn bar_event<M>(
+    fn bar_event(
         &self,
         state: &mut SmoothState,
         event: &iced::Event,
@@ -380,7 +386,7 @@ impl Smooth {
     }
 }
 
-impl<M> Hooks<M> for Smooth {
+impl<M> Hooks<M> for Smooth<M> {
     type State = SmoothState;
 
     fn update(
@@ -422,10 +428,18 @@ impl<M> Hooks<M> for Smooth {
                         shell.request_redraw();
                     }
                 }
-                if self.bar.is_some() {
+                if self.bar.is_some() || self.on_vertical_viewport.is_some() {
                     // Where the frame about to be drawn has the list.
-                    state.bar.rooms = self.rooms(child);
-                    if state.bar.frame(*now) {
+                    let rooms = self.rooms(child);
+                    state.bar.rooms = rooms;
+                    if let Some(report) = self.on_vertical_viewport {
+                        let viewport = (rooms.y.offset, at.bounds.height);
+                        if state.vertical_viewport != Some(viewport) {
+                            state.vertical_viewport = Some(viewport);
+                            shell.publish(report(viewport.0, viewport.1));
+                        }
+                    }
+                    if self.bar.is_some() && state.bar.frame(*now) {
                         shell.request_redraw();
                     }
                 }
@@ -542,13 +556,13 @@ fn trace_step(frame: Instant, rooms: Rooms, by: Vector) {
 
 /// Moves the scrollable a [`Smooth`] is round by what `step` makes of
 /// its room: the first scrollable its operation meets.
-struct Drive<'a> {
-    smooth: &'a Smooth,
+struct Drive<'a, M> {
+    smooth: &'a Smooth<M>,
     step: &'a mut (dyn FnMut(Rooms) -> Vector + Send),
     done: bool,
 }
 
-impl Operation for Drive<'_> {
+impl<M> Operation for Drive<'_, M> {
     fn traverse(&mut self, _: &mut dyn FnMut(&mut dyn Operation)) {}
 
     fn scrollable(

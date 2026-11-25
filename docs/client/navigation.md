@@ -46,6 +46,10 @@ The rail keeps where it was scrolled as the room or server opens; a server
 or the DM home opens its channels at the sidebar's top, and a click on a
 channel moves neither.
 
+The sidebar builds rows near the visible area using the scroll position
+reported on redraw. A list that fits reports its position too, so its
+rows stay visible after switching from a longer list.
+
 The sidebar (`sidebar/`: its rows' model in `rows.rs`, the top, channels,
 voice and DM rows each a file) shows, on the DM
 home, the search field (which keeps the DMs whose names hold its text,
