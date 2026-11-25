@@ -2605,6 +2605,13 @@ fn animations(
     dark: bool,
     vars: &css::Vars,
 ) -> Vec<Animation> {
+    /// An animation's name as a theme writes it, without the quotes CSS allows
+    /// around an identifier: `@keyframes "wash"` and `animation: wash` name the
+    /// same animation.
+    fn animation_name(name: &str) -> String {
+        name.trim().trim_matches(['"', '\'']).to_owned()
+    }
+
     /// What one rule says about one animation name, before the keyframes are
     /// turned into frames.
     #[derive(Clone, Default)]
@@ -2656,7 +2663,7 @@ fn animations(
                     names.extend(
                         crate::color::split_top(&value, ',')
                             .into_iter()
-                            .map(|name| name.trim().to_owned()),
+                            .map(animation_name),
                     );
                 }
                 "animation" => {
@@ -2667,7 +2674,7 @@ fn animations(
                     shorthand.extend(
                         value
                             .split_whitespace()
-                            .map(|token| token.trim().to_owned())
+                            .map(animation_name)
                             .filter(|token| sheet.keyframes.contains_key(token)),
                     );
                 }
@@ -3452,6 +3459,21 @@ html.theme-light:not([data-rl-mode="dark"]) {
         // Reading without asking keeps the collection empty.
         let plain = load_str(css, None, &Options::with_mode(Mode::Dark)).expect("readable");
         assert!(plain.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_quoted_animation_name_finds_its_keyframes() {
+        let theme = load_str(
+            r#"
+            @keyframes "wash" { from { background: #101014; } to { background: #e94221; } }
+            body { animation: "wash" 2s infinite; }
+            "#,
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .expect("theme");
+        assert_eq!(theme.look.animations.len(), 1);
+        assert_eq!(theme.look.animations[0].name, "wash");
     }
 
     #[test]

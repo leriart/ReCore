@@ -528,9 +528,12 @@ fn parse_block(
                 .unwrap_or("");
             let lower = name.to_ascii_lowercase();
             match lower.as_str() {
-                "font-face" => {
-                    stylesheet.fonts.push(font_face(body, origin));
-                }
+                "font-face" => match font_face(body, origin) {
+                    Some(face) => stylesheet.fonts.push(face),
+                    None => stylesheet
+                        .warnings
+                        .push("an @font-face without a font-family is skipped".into()),
+                },
                 "layer" => {
                     let name = prelude_after(prelude, "layer").trim().to_owned();
                     let rank = stylesheet.layer_rank(&name);
@@ -1219,10 +1222,18 @@ fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
     match name.as_str() {
         "width" | "device-width" => compare(width(), &value),
         "height" | "device-height" => compare(height(), &value),
-        "min-width" | "min-device-width" => width() >= media_length(&value).unwrap_or(0.0),
-        "max-width" | "max-device-width" => width() <= media_length(&value).unwrap_or(f32::MAX),
-        "min-height" | "min-device-height" => height() >= media_length(&value).unwrap_or(0.0),
-        "max-height" | "max-device-height" => height() <= media_length(&value).unwrap_or(f32::MAX),
+        "min-width" | "min-device-width" => {
+            media_length(&value).is_some_and(|wanted| width() >= wanted)
+        }
+        "max-width" | "max-device-width" => {
+            media_length(&value).is_some_and(|wanted| width() <= wanted)
+        }
+        "min-height" | "min-device-height" => {
+            media_length(&value).is_some_and(|wanted| height() >= wanted)
+        }
+        "max-height" | "max-device-height" => {
+            media_length(&value).is_some_and(|wanted| height() <= wanted)
+        }
         "aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| close(viewport_ratio(), ratio)),
         "min-aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| viewport_ratio() >= ratio),
         "max-aspect-ratio" => ratio(value.as_str()).is_none_or(|ratio| viewport_ratio() <= ratio),
@@ -2083,7 +2094,7 @@ fn declarations(body: &str) -> Vec<Declaration> {
     declarations
 }
 
-fn font_face(body: &str, origin: Option<&str>) -> FontFace {
+fn font_face(body: &str, origin: Option<&str>) -> Option<FontFace> {
     let mut family = String::new();
     let mut weight = 400;
     let mut italic = false;
@@ -2131,14 +2142,19 @@ fn font_face(body: &str, origin: Option<&str>) -> FontFace {
             _ => {}
         }
     }
-    FontFace {
+    // A face without a family can never be selected; the CSS is invalid and
+    // the reader leaves it out rather than carrying an empty name.
+    if family.is_empty() {
+        return None;
+    }
+    Some(FontFace {
         family,
         weight,
         italic,
         data,
         source,
         origin: origin.map(str::to_owned),
-    }
+    })
 }
 
 /// The bytes of a `data:` URI, when it carries them.
@@ -3088,6 +3104,40 @@ mod tests {
         assert_eq!(sheet.fonts[0].family, "Test");
         assert_eq!(sheet.fonts[0].weight, 700);
         assert_eq!(sheet.fonts[0].data.as_deref(), Some(&[0, 1, 2][..]));
+    }
+
+    #[test]
+    fn a_font_face_without_a_family_is_skipped() {
+        let sheet = parse(
+            r#"@font-face { src: url("data:font/ttf;base64,AAEC"); }
+               @font-face { font-family: ""; src: url("data:font/ttf;base64,AAEC"); }"#,
+            |_, _| None,
+        );
+        assert!(sheet.fonts.is_empty());
+        assert!(
+            sheet
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("@font-face"))
+                .count()
+                >= 2,
+            "{:?}",
+            sheet.warnings
+        );
+    }
+
+    #[test]
+    fn a_media_feature_without_a_value_matches_nothing() {
+        for query in [
+            "(min-width:)",
+            "(max-width:)",
+            "(min-height:)",
+            "(max-height:)",
+        ] {
+            assert!(!media_applies(query), "{query} applies");
+        }
+        assert!(media_applies("(min-width: 1000px)"));
+        assert!(media_applies("(max-height: 800px)"));
     }
 
     #[test]
