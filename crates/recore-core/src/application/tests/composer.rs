@@ -458,6 +458,19 @@ fn a_channel_whose_permissions_forbid_attaching_offers_no_clip() {
     assert!(!room.can_embed());
     assert!(!app.state.can_attach());
 
+    // A drop or a paste arrives as `Stage`, not through the clip, so the
+    // action must refuse too.
+    let folder = tempfile::tempdir().unwrap();
+    let notes = folder.path().join("notes.txt");
+    std::fs::write(&notes, b"hi").unwrap();
+    app.dispatch(Action::Stage(vec![notes]));
+    assert!(app.state.staged().is_empty());
+    assert_eq!(
+        app.state.notice.as_deref(),
+        Some("You don't have permission to attach files in this channel.")
+    );
+    app.state.notice = None;
+
     let room = app
         .state
         .rooms

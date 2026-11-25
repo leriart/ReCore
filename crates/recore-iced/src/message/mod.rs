@@ -833,6 +833,26 @@ fn thread_chip<'a>(ctx: crate::ctx::Ctx<'a>, thread: &'a chat::ThreadLink) -> El
         .into()
 }
 
+/// What the row under a message of one's own says: its words, whether Retry
+/// is offered, and whether Cancel is. A Discord upload in flight is a
+/// request Discord is already reading (`n:`), so it cannot be taken back; a
+/// Matrix transaction (`t:`) and a queued send can.
+fn delivery_controls(message: &ChatMessage) -> Option<(&'static str, bool, bool)> {
+    match message.delivery {
+        chat::Delivery::Sent => None,
+        chat::Delivery::Sending if message.attachments.is_empty() => None,
+        chat::Delivery::Sending => Some(("Sending...", false, !message.item.starts_with("n:"))),
+        chat::Delivery::Waiting => Some((
+            "Not sent yet. ReCore sends it when the connection returns.",
+            false,
+            true,
+        )),
+        // An app's command, whose row says why.
+        chat::Delivery::Failed if message.item.starts_with("c:") => Some(("Not sent.", true, true)),
+        chat::Delivery::Failed => Some(("Not sent. The server refused this message.", true, true)),
+    }
+}
+
 /// How a message of one's own is going, under it: "Sending..." while its
 /// files go, "Not sent yet" while the connection is down, or "Not sent" with
 /// Retry. Cancel removes one the server refused; an upload in flight cannot
@@ -843,18 +863,8 @@ fn delivery_line<'a>(
 ) -> Option<Element<'a, Message>> {
     use crate::composer::Event;
     let theme = ctx.look.theme;
-    let (words, retry, cancel) = match message.delivery {
-        chat::Delivery::Sent => return None,
-        chat::Delivery::Sending if message.attachments.is_empty() => return None,
-        chat::Delivery::Sending => ("Sending...", false, false),
-        chat::Delivery::Waiting => (
-            "Not sent yet. ReCore sends it when the connection returns.",
-            false,
-            false,
-        ),
-        // An app's command, whose row says why.
-        chat::Delivery::Failed if message.item.starts_with("c:") => ("Not sent.", true, true),
-        chat::Delivery::Failed => ("Not sent. The server refused this message.", true, true),
+    let Some((words, retry, cancel)) = delivery_controls(message) else {
+        return None;
     };
     let failed = message.delivery == chat::Delivery::Failed;
     let mut line =
@@ -920,4 +930,42 @@ fn ephemeral_line<'a>(ctx: crate::ctx::Ctx<'a>, message: &ChatMessage) -> Elemen
 pub fn content_width_of(ctx: crate::ctx::Ctx<'_>, row: usize) -> f32 {
     let (lane, _) = ctx.lane_place(row);
     (lane.width - GUTTER - END_PAD).max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn controls(
+        item: &str,
+        delivery: recore_core::chat::Delivery,
+    ) -> Option<(&'static str, bool, bool)> {
+        delivery_controls(&ChatMessage {
+            item: item.into(),
+            delivery,
+            attachments: vec![Default::default()],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn cancel_follows_what_each_network_can_take_back() {
+        use recore_core::chat::Delivery;
+        // A Discord upload in flight is a request Discord is already reading;
+        // a Matrix transaction and a queued send are still ours to drop.
+        assert_eq!(
+            controls("n:1", Delivery::Sending),
+            Some(("Sending...", false, false))
+        );
+        assert_eq!(
+            controls("t:1", Delivery::Sending),
+            Some(("Sending...", false, true))
+        );
+        assert_eq!(
+            controls("t:1", Delivery::Waiting).map(|(_, _, cancel)| cancel),
+            Some(true)
+        );
+        assert_eq!(controls("i1", Delivery::Sent), None);
+        assert_eq!(controls("i1", Delivery::Sending), None);
+    }
 }

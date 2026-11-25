@@ -3900,13 +3900,14 @@ impl Application {
                 if self.state.busy || self.state.preview || self.state.account.is_none() {
                     vec![]
                 } else {
-                    // Matrix restarts its sync; a Discord account starts its
-                    // session again. Each network ignores the other's command,
-                    // so one button serves a build of either or both.
-                    vec![
-                        Effect::Backend(Command::RetrySync),
-                        Effect::Backend(Command::RetryDiscord),
-                    ]
+                    // Matrix restarts its sync; a linked Discord account
+                    // starts its session again. A Matrix-only account has no
+                    // Discord to start, and would only get an error notice.
+                    let mut effects = vec![Effect::Backend(Command::RetrySync)];
+                    if self.state.discord_linked || self.state.discord_accounts.active.is_some() {
+                        effects.push(Effect::Backend(Command::RetryDiscord));
+                    }
+                    effects
                 }
             }
             Action::Logout => self.logout(),

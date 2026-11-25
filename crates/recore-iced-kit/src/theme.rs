@@ -211,6 +211,40 @@ macro_rules! declare_theme {
 
 for_theme_colours!(declare_theme);
 
+/// WCAG's contrast ratio between two opaque colours.
+pub fn contrast(a: Color, b: Color) -> f32 {
+    let luminance = |colour: Color| {
+        let channel = |value: f32| {
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(colour.r) + 0.7152 * channel(colour.g) + 0.0722 * channel(colour.b)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// `ink` moved towards `toward` until it reads on `ground` at `least`, in
+/// tenths; an ink that already reads is returned as it is.
+pub fn readable_on(ink: Color, toward: Color, ground: Color, least: f32) -> Color {
+    if contrast(ink, ground) >= least {
+        return ink;
+    }
+    let mut best = ink;
+    for step in 1..=10 {
+        best = mix(ink, toward, step as f32 / 10.0);
+        if contrast(best, ground) >= least {
+            break;
+        }
+    }
+    // A palette whose two inks are both too close to the ground keeps the
+    // nearest it has rather than turning black.
+    best
+}
+
 impl Theme {
     /// The colours worked out from the others, once those are set.
     pub fn worked_out(self) -> Self {
@@ -247,10 +281,13 @@ impl Theme {
             } else {
                 self.muted
             },
+            // An error reads on the panel it sits on: a light palette's own
+            // red can sit under 4.5:1 there, so it is darkened towards the
+            // palette's ink until it reads.
             danger_text: if dark {
                 crate::style::hex(0xfa777c)
             } else {
-                self.danger
+                readable_on(self.danger, self.text, self.panel, 4.5)
             },
             channel_read: if self.bonfire {
                 crate::style::hex(0x81828a)
@@ -322,5 +359,26 @@ pub fn mix(color: Color, other: Color, factor: f32) -> Color {
         g: lerp(color.g, other.g, channels),
         b: lerp(color.b, other.b, channels),
         a: lerp(color.a, other.a, factor),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_error_ink_reads_on_a_light_panel() {
+        // Rosé Pine Dawn's red on its light panel: under 4.5:1 as written,
+        // over it once darkened towards the palette's ink.
+        let ink = crate::style::hex(0xb4637a);
+        let text = crate::style::hex(0x575279);
+        let panel = crate::style::hex(0xfaf4ed);
+        assert!(contrast(ink, panel) < 4.5);
+        let read = readable_on(ink, text, panel, 4.5);
+        assert!(contrast(read, panel) >= 4.5, "{:?}", contrast(read, panel));
+
+        // An ink that already reads is untouched.
+        let dark = crate::style::hex(0x050505);
+        assert_eq!(readable_on(dark, text, panel, 4.5), dark);
     }
 }

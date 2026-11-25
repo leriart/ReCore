@@ -6235,6 +6235,13 @@ pub async fn run(
                         // with when the account id isn't known yet.
                         let account = discord_account
                             .clone()
+                            .or_else(|| {
+                                // A session started on a saved token may not know
+                                // its id yet; its first snapshot names it.
+                                discord.as_ref().and_then(|chat| {
+                                    chat.service().snapshots().borrow().user_id.clone()
+                                })
+                            })
                             .or_else(recore_discord::token::current_account);
                         match account.map(|account| {
                             switch_discord(

@@ -445,15 +445,22 @@ impl Application {
     /// Adds files to a room's next message, up to as many and as large as
     /// it takes, saying why any can't go.
     fn stage_in(&mut self, id: String, paths: Vec<PathBuf>) {
-        let Some(limit) = self
+        let Some((limit, may_attach)) = self
             .state
             .rooms
             .iter()
             .find(|room| room.id == id)
-            .map(|room| room.upload_limit)
+            .map(|room| (room.upload_limit, room.can_attach()))
         else {
             return;
         };
+        // The window hides the clip, but a drop or a paste arrives as this
+        // action too, and a channel without Attach Files refuses them all.
+        if !may_attach {
+            self.state.notice =
+                Some("You don't have permission to attach files in this channel.".into());
+            return;
+        }
         let staged = self.state.staged.entry(id).or_default();
         let mut problem = None;
         for path in paths {
