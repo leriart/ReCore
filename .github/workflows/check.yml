@@ -19,3 +19,27 @@ jobs:
         run: cargo clippy -p recore-css --all-targets --locked -- -D warnings
       - name: CSS interpreter tests
         run: cargo test -p recore-css --locked
+
+  # The Discord protocol and the window's kit have no C build of their own
+  # (no x264/FFmpeg, so no NASM), so their tests run here beside the
+  # interpreter's. The window itself needs the core, whose vendored encoders
+  # do need NASM; `scripts/check --fast` covers it on a development machine.
+  discord:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - name: Discord protocol tests
+        run: cargo test -p recore-discord --locked
+
+  kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - name: The window kit's tests
+        run: cargo test -p recore-iced-kit --locked

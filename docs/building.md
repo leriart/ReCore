@@ -191,6 +191,13 @@ whole workspace; a build; and the smoke test, which runs
 `target/<profile>/recore` from that build. These build the default features,
 the release's: the window with Discord (see [Networks](#networks)).
 
+GitHub's check (`.github/workflows/check.yml`) runs what needs no C
+toolchain on 1.97.1: the interpreter's formatting, Clippy and tests, the
+Discord protocol's tests and the window kit's tests. The window and the core
+build the vendored encoders, which need NASM, so `scripts/check` on a
+development machine covers them; the workflow is a floor, not the whole
+check.
+
 Clippy checks more than its defaults: the root `Cargo.toml`'s
 `[workspace.lints]` adds lints against clones, copies and collections the
 code doesn't need, against leftovers such as `dbg!` and `todo!`, and asks a
