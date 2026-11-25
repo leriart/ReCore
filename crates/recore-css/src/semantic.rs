@@ -75,8 +75,13 @@ enum Key {
 /// once and each region is computed once.
 pub(crate) fn compute(sheet: &Stylesheet, vars: &css::Vars, dark: bool) -> Option<Computed> {
     let used = used_vars(sheet, vars, dark);
-    let active = active_roles(sheet, dark);
     let states = state_roles(sheet, dark);
+    // A region's own node, and the ancestors it hangs from, must exist for a
+    // selector that names it — or a state of it — to match where it sits.
+    let mut active = active_roles(sheet, dark);
+    active.extend(states.hover.iter().copied());
+    active.extend(states.focus.iter().copied());
+    include_ancestors(&mut active);
     let css = to_css(sheet, vars, dark, &used);
     let engine_sheet = parse_stylesheet(&css);
     let environment = MediaEnv {
@@ -237,7 +242,7 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
             // variable that doubles itself stops at its budget.
             let region_local = regions
                 .iter()
-                .any(|name| declaration.value.contains(name.as_str()));
+                .any(|name| mentions_var(&declaration.value, name));
             let value = if region_local {
                 color_functions(&declaration.value, !dark)
             } else {
@@ -287,6 +292,22 @@ fn region_vars(sheet: &Stylesheet, dark: bool) -> BTreeSet<String> {
         }
     }
     names
+}
+
+/// Whether `value` reads the custom property `name` through `var()`.
+fn mentions_var(value: &str, name: &str) -> bool {
+    let mut rest = value;
+    while let Some(start) = css::find_ignore_case(rest, "var(") {
+        let after = &rest[start + 4..];
+        let Some(end) = css::matching_paren(after) else {
+            return false;
+        };
+        if after[..end].split(',').next().unwrap_or("").trim() == name {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
 }
 
 /// Whether a selector names a native region. A bare tag or `*` is too broad:
@@ -428,7 +449,6 @@ fn active_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
             }
         }
     }
-    include_ancestors(&mut roles);
     roles
 }
 
