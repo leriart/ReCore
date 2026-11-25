@@ -672,6 +672,13 @@ pub fn load_str_with_imports(
     let mut fonts = Vec::new();
     if options.fonts {
         for face in &sheet.fonts {
+            if face.source.trim().is_empty() {
+                warnings.push(format!(
+                    "the @font-face {} names no src; skipped",
+                    face.family
+                ));
+                continue;
+            }
             let mut bytes = face.data.clone();
             if bytes.is_none() {
                 if let Some(url) = remote_source(&face.source, face.origin.as_deref()) {

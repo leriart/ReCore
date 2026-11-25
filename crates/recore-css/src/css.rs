@@ -258,7 +258,12 @@ fn expand(
     }
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     collect_notes(text, &mut stylesheet.notes);
-    let source = strip_comments(text);
+    let (source, comment_open) = strip_comments(text);
+    if comment_open {
+        stylesheet
+            .warnings
+            .push("a comment is never closed; the file ends where it starts".into());
+    }
     let origin = base.map(|path| path.to_string_lossy().into_owned());
     let bytes = source.as_bytes();
     let mut index = 0;
@@ -2210,10 +2215,12 @@ fn percent_decode(text: &str) -> Vec<u8> {
 }
 
 /// Removes comments, keeping line breaks and string contents.
-fn strip_comments(text: &str) -> String {
+/// `text` without its comments, and whether one was left open.
+fn strip_comments(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut quote: Option<char> = None;
+    let mut open = false;
     while let Some(character) = chars.next() {
         if let Some(active) = quote {
             out.push(character);
@@ -2235,20 +2242,23 @@ fn strip_comments(text: &str) -> String {
             }
             '/' if chars.peek() == Some(&'*') => {
                 chars.next();
+                let mut closed = false;
                 while let Some(character) = chars.next() {
                     if character == '*' && chars.peek() == Some(&'/') {
                         chars.next();
+                        closed = true;
                         break;
                     }
                     if character == '\n' {
                         out.push('\n');
                     }
                 }
+                open |= !closed;
             }
             _ => out.push(character),
         }
     }
-    out
+    (out, open)
 }
 
 /// `prefers-color-scheme: dark` and its light sibling in a media query.
@@ -3107,6 +3117,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_comment_is_named() {
+        let sheet = parse("a { color: red; } /* never closed", |_, _| None);
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(
+            sheet
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("comment is never closed")),
+            "{:?}",
+            sheet.warnings
+        );
+    }
+
+    #[test]
     fn a_font_face_without_a_family_is_skipped() {
         let sheet = parse(
             r#"@font-face { src: url("data:font/ttf;base64,AAEC"); }
@@ -3171,9 +3195,10 @@ mod tests {
 
     #[test]
     fn comments_keep_their_utf8_text() {
-        let text = strip_comments("/* café */ a{content:\"café…\";color:#fff}");
+        let (text, open) = strip_comments("/* café */ a{content:\"café…\";color:#fff}");
         assert!(text.contains("café"), "{text}");
         assert!(text.contains("\"café…\""), "{text}");
+        assert!(!open);
     }
 
     #[test]
@@ -3395,9 +3420,10 @@ mod tests {
 
     #[test]
     fn comments_are_stripped_but_strings_are_not() {
-        let text = strip_comments("a{content:\"/*x*/\";/*y*/color:red}");
+        let (text, open) = strip_comments("a{content:\"/*x*/\";/*y*/color:red}");
         assert!(text.contains("\"/*x*/\""));
         assert!(!text.contains("/*y*/"));
+        assert!(!open);
     }
 
     #[test]
