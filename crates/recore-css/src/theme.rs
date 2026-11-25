@@ -29,6 +29,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
@@ -484,6 +485,63 @@ pub fn load(path: impl AsRef<Path>) -> Result<ThemeFile, String> {
     load_with(path, &Options::default())
 }
 
+/// The largest theme file, imported sheet or font the reader keeps, in bytes.
+///
+/// A theme is data and may name anything; a local `@import` of a device, a
+/// pipe or a multi-gigabyte file would otherwise stop the window from ever
+/// opening. Eight mebibytes holds every theme and font the known clients
+/// ship (the largest bundled theme is 447 KiB) and matches the remote limit
+/// `docs/themes.md` gives.
+const LOCAL_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Reads a local file the theme names, refusing anything that is not a
+/// regular file of a bounded size. `Err` says why, for the caller's warning.
+fn read_local(path: &Path, what: &str) -> Result<Vec<u8>, String> {
+    // A device, a FIFO or a directory is refused before it is opened: opening
+    // a pipe waits for its writer, and reading a device has no end. A link
+    // that turns into one is caught again below.
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        let followed =
+            fs::metadata(path).map_err(|error| format!("could not read the {what}: {error}"))?;
+        if !followed.is_file() {
+            return Err(format!("the {what} is not a regular file; left out"));
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // A file that turns into a pipe between the check and the open still
+    // cannot hold the window: with the flag, opening one does not wait for a
+    // writer.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x800);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("could not read the {what}: {error}"))?;
+    // The metadata comes from the open file, so a swap besides the open
+    // cannot change what is read.
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not read the {what}: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("the {what} is not a regular file; left out"));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(LOCAL_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read the {what}: {error}"))?;
+    if bytes.len() as u64 > LOCAL_LIMIT {
+        return Err(format!(
+            "the {what} is larger than {} MiB; left out",
+            LOCAL_LIMIT / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Reads a theme file with `options`, downloading the `http:` and `https:`
 /// imports and fonts it names through `fetch`. A remote picture stays an
 /// [`Image::Url`], which the caller fetches when it shows the theme.
@@ -493,7 +551,10 @@ pub fn load_with_imports(
     fetch: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
 ) -> Result<ThemeFile, String> {
     let path = path.as_ref();
-    let css = fs::read_to_string(path)
+    let css = read_local(path, "theme")
+        .and_then(|bytes| {
+            String::from_utf8(bytes).map_err(|_| "the theme is not readable UTF-8".to_owned())
+        })
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     load_css_with_imports(path, &css, options, fetch)
 }
@@ -797,10 +858,16 @@ fn read_import(
 ) -> Option<(String, PathBuf)> {
     let path = path.trim().trim_start_matches("file://");
     let full = resolve_path(directory, path)?;
-    match fs::read_to_string(&full) {
-        Ok(text) => Some((text, full)),
+    match read_local(&full, "import") {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Some((text, full)),
+            Err(_) => {
+                warnings.push(format!("the import {} is not UTF-8 CSS", full.display()));
+                None
+            }
+        },
         Err(error) => {
-            warnings.push(format!("could not read {}: {error}", full.display()));
+            warnings.push(format!("{error}: {}", full.display()));
             None
         }
     }
@@ -830,13 +897,10 @@ fn read_font(
     }
     let path = path.trim_start_matches("file://");
     let full = resolve_path(directory, path)?;
-    match fs::read(&full) {
+    match read_local(&full, "font") {
         Ok(bytes) => Some(bytes),
         Err(error) => {
-            warnings.push(format!(
-                "could not read the font {}: {error}",
-                full.display()
-            ));
+            warnings.push(format!("{error}: {}", full.display()));
             None
         }
     }

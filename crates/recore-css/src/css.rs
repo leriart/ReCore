@@ -7,7 +7,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, HashMap},
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
@@ -202,13 +202,14 @@ pub fn parse_in(
     resolve: &mut impl FnMut(Option<&Path>, &str) -> Option<(String, PathBuf)>,
 ) -> Stylesheet {
     let mut stylesheet = Stylesheet::default();
-    let mut imported = Vec::new();
+    let mut chain = Vec::new();
     expand(
         text,
         base,
+        None,
         &mut stylesheet,
         resolve,
-        &mut imported,
+        &mut chain,
         0,
         None,
         None,
@@ -225,9 +226,10 @@ pub fn parse_in(
 fn expand(
     text: &str,
     base: Option<&Path>,
+    file: Option<&Path>,
     stylesheet: &mut Stylesheet,
     resolve: &mut impl FnMut(Option<&Path>, &str) -> Option<(String, PathBuf)>,
-    imported: &mut Vec<PathBuf>,
+    chain: &mut Vec<PathBuf>,
     depth: usize,
     layer: Option<u32>,
     scheme: Option<bool>,
@@ -237,6 +239,22 @@ fn expand(
             .warnings
             .push("more than 16 nested imports; stopped".into());
         return;
+    }
+    // A sheet that imports itself, directly or through others, is read once:
+    // the file the reader resolved is the one a cycle repeats, whatever the
+    // import beside it wrote. It joins the chain for as long as its own
+    // imports are read.
+    let mut here = None;
+    if let Some(file) = file {
+        let now = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        if chain.contains(&now) {
+            stylesheet
+                .warnings
+                .push(format!("{} imports itself; read once", file.display()));
+            return;
+        }
+        chain.push(now.clone());
+        here = Some(now);
     }
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     collect_notes(text, &mut stylesheet.notes);
@@ -336,10 +354,6 @@ fn expand(
                             stylesheet.warnings.push(format!(
                                 "@import {path} is a data: URI, not a stylesheet, so it is skipped"
                             ));
-                        } else if imported.iter().any(|seen| seen == &path) {
-                            stylesheet
-                                .warnings
-                                .push(format!("@import {path} already read; skipped the loop"));
                         } else {
                             let rank = condition
                                 .layer
@@ -348,18 +362,25 @@ fn expand(
                                 .or(layer);
                             match resolve(base, &path) {
                                 Some((imported_text, full)) => {
-                                    imported.push(full.clone());
-                                    expand(
-                                        &imported_text,
-                                        full.parent(),
-                                        stylesheet,
-                                        resolve,
-                                        imported,
-                                        depth + 1,
-                                        rank,
-                                        media_scheme(&condition.media).or(scheme),
-                                    );
-                                    imported.pop();
+                                    let canonical =
+                                        fs::canonicalize(&full).unwrap_or_else(|_| full.clone());
+                                    if chain.contains(&canonical) {
+                                        stylesheet.warnings.push(format!(
+                                            "@import {path} already read; skipped the loop"
+                                        ));
+                                    } else {
+                                        expand(
+                                            &imported_text,
+                                            full.parent(),
+                                            Some(&full),
+                                            stylesheet,
+                                            resolve,
+                                            chain,
+                                            depth + 1,
+                                            rank,
+                                            media_scheme(&condition.media).or(scheme),
+                                        );
+                                    }
                                 }
                                 None => stylesheet
                                     .warnings
@@ -390,6 +411,9 @@ fn expand(
             origin.as_deref(),
             layer,
         );
+    }
+    if here.is_some() {
+        chain.pop();
     }
 }
 

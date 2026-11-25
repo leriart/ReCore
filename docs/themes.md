@@ -193,6 +193,12 @@ theme carries:
   the theme and says so in Appearance's note. A theme's remote imports are
   fetched when the theme is chosen, so a folder full of remote themes does
   not stall the first frame.
+- Local files: an `@import` and a `@font-face`'s file are read only when
+  they are regular files of at most 8 MB, the same limit as a download, so a
+  theme that names a device, a pipe or a huge file cannot keep the window
+  from opening; that import is left out and Appearance's note says why. A
+  sheet that imports itself, directly or through other sheets, is read once
+  and the loop is named in the note.
 - Its fonts: `@font-face` with a `data:` URI, a file beside the theme or a
   remote URL is loaded into the window's font system, and `--font-primary`
   picks the family.
