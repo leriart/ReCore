@@ -154,8 +154,8 @@ or deafened one sits on a dark ground with a faint seam before its caret. Settin
 open on the section they last showed (`Window::settings_section`), My
 Account at first. While
 ReCore is offline (not in the preview), Reconnect stands before Settings
-and connects again at once (`Action::RetrySync`), greyed while a sync
-runs. The call's
+and connects again at once: a Discord account's session starts again, and
+Matrix's sync restarts (`Action::RetrySync`), greyed while a sync runs. The call's
 dock sits above the card while this account is in a call (see
 [calls](calls.md)).
 

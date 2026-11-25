@@ -442,6 +442,47 @@ fn a_drop_is_refused_whole_as_discords_client_refuses_it() {
 }
 
 #[test]
+fn a_channel_whose_permissions_forbid_attaching_offers_no_clip() {
+    let mut app = connected();
+    let id = app.state.selected.clone().expect("a room");
+    let room = app
+        .state
+        .rooms
+        .iter_mut()
+        .map(Arc::make_mut)
+        .find(|room| room.id == id)
+        .expect("the room");
+    // Discord's bits: no `ATTACH_FILES` and no `EMBED_LINKS`.
+    room.permissions = Some(0);
+    assert!(!room.can_attach());
+    assert!(!room.can_embed());
+    assert!(!app.state.can_attach());
+
+    let room = app
+        .state
+        .rooms
+        .iter_mut()
+        .map(Arc::make_mut)
+        .find(|room| room.id == id)
+        .expect("the room");
+    room.permissions = Some(chat::ATTACH_FILES | chat::EMBED_LINKS);
+    assert!(room.can_attach());
+    assert!(room.can_embed());
+    assert!(app.state.can_attach());
+
+    // A room whose permissions aren't known keeps the older behaviour.
+    let room = app
+        .state
+        .rooms
+        .iter_mut()
+        .map(Arc::make_mut)
+        .find(|room| room.id == id)
+        .expect("the room");
+    room.permissions = None;
+    assert!(room.can_attach());
+}
+
+#[test]
 fn uploads_name_their_destination_as_discord_does() {
     let mut app = connected();
     fn room(app: &mut Application) -> &mut ChatRoom {

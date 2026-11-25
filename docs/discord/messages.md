@@ -254,7 +254,10 @@ ReCore is back, rather than showing an error.
   `premium_type` in READY and USER_UPDATE. The web client's own constant
   without Nitro is still 10 MiB, but `getMaxFileSize` raises every limit to
   at least 20 MiB (`Math.max(0x1400000, …)`) before it checks a file or names
-  the limit, so 20 MB is what it enforces.
+  the limit, so 20 MB is what it enforces. A channel whose permissions
+  leave out Attach Files offers no clip and refuses a drop, as Discord's
+  client does; without Embed Links a link still sends, just without its
+  card.
 - Link previews and bots' cards show from the embeds Discord adds to a
   message: Discord's servers read the linked page's Open Graph tags, often a
   moment after sending, and the preview arrives in a message update. A card

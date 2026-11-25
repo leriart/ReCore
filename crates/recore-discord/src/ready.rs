@@ -48,6 +48,11 @@ pub mod permission {
     pub const MANAGE_MESSAGES: u64 = 1 << 13;
     pub const VIEW_CHANNEL: u64 = 1 << 10;
     pub const SEND_MESSAGES: u64 = 1 << 11;
+    /// Making a link's preview card under a message; without it Discord
+    /// still sends the message, just without the card.
+    pub const EMBED_LINKS: u64 = 1 << 14;
+    /// Uploading files with a message.
+    pub const ATTACH_FILES: u64 = 1 << 15;
     pub const READ_MESSAGE_HISTORY: u64 = 1 << 16;
     pub const MENTION_EVERYONE: u64 = 1 << 17;
     pub const VIEW_GUILD_ANALYTICS: u64 = 1 << 19;
@@ -2129,6 +2134,25 @@ mod tests {
             Access::Join,
             "administrators too"
         );
+    }
+
+    #[test]
+    fn a_role_without_attach_files_may_not_attach_in_a_channel() {
+        let server = Server {
+            id: "10".into(),
+            roles: HashMap::from([("10".into(), VIEW_CHANNEL | SEND_MESSAGES)]).into(),
+            ..Default::default()
+        };
+        let channel = Channel::default();
+        let permissions = server.channel_permissions(&channel, "1", &[]);
+        assert_ne!(permissions & SEND_MESSAGES, 0, "the role may send messages");
+        let can_attach = permissions & permission::ATTACH_FILES != 0;
+        assert!(
+            !can_attach,
+            "sending doesn't give uploading files with the message"
+        );
+        assert_eq!(permission::ATTACH_FILES, 1 << 15);
+        assert_eq!(permission::EMBED_LINKS, 1 << 14);
     }
 
     #[test]

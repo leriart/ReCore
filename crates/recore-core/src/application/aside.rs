@@ -59,6 +59,7 @@ impl AppState {
         self.aside.as_ref().is_some_and(|aside| {
             self.can_write_in(&aside.room)
                 && !self.preview
+                && self.aside_room().is_some_and(|room| room.can_attach())
                 && self.aside_staged().len() < chat::MAX_FILES
         })
     }

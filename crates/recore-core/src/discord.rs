@@ -713,6 +713,7 @@ fn dm_room(snapshot: &Snapshot, dm: &Conversation, premium: u8, me: &str) -> Cha
         join_locked: false,
         // Replying waits until the request is accepted.
         read_only: dm.request,
+        permissions: None,
         reacts: if dm.request {
             Reacts::None
         } else {
@@ -878,6 +879,7 @@ fn server_rooms(
                 locked: marks.access == Access::Hidden,
                 join_locked: marks.access != Access::Join,
                 read_only: !server.may_send(channel, me, &server.marks.roles),
+                permissions: known_permissions(server, channel, me),
                 reacts: reacts(server, channel, me),
                 slowed: server.slowed(channel, me, &server.marks.roles),
                 timed_out_until: server.my_timeout.as_ref().map(|timeout| timeout.until),
@@ -931,6 +933,7 @@ fn server_rooms(
                 locked: marks.access == Access::Hidden,
                 join_locked: false,
                 read_only: marks.access == Access::Locked,
+                permissions: known_permissions(server, channel, me),
                 reacts: reacts(server, channel, me),
                 slowed: server.slowed(channel, me, &server.marks.roles),
                 timed_out_until: server.my_timeout.as_ref().map(|timeout| timeout.until),
@@ -1007,6 +1010,18 @@ fn server_rooms(
             .collect(),
     };
     (rooms, server)
+}
+
+/// What `me` may do in `channel`, when the server's roles are known. A
+/// server whose roles haven't arrived says `None`, so a room made without
+/// them is not read as forbidding.
+#[cfg(feature = "discord")]
+fn known_permissions(
+    server: &MarkedServer,
+    channel: &recore_discord::ready::Channel,
+    me: &str,
+) -> Option<u64> {
+    (!server.roles.is_empty()).then(|| server.channel_permissions(channel, me, &server.marks.roles))
 }
 
 /// What reacting `me` may do in a server's channel or thread, as Discord's
@@ -1088,6 +1103,7 @@ fn thread_room(
         join_locked: false,
         // Locked, or this account may not write in threads here.
         read_only: thread.marks.access == Access::Locked,
+        permissions: known_permissions(server, &thread, me),
         reacts: reacts(server, &thread, me),
         slowed: server.slowed(&thread, me, &server.marks.roles),
         timed_out_until: server.my_timeout.as_ref().map(|timeout| timeout.until),

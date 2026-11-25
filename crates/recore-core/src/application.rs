@@ -1467,7 +1467,10 @@ impl AppState {
     }
 
     pub fn can_attach(&self) -> bool {
-        self.can_write() && !self.preview && self.staged().len() < chat::MAX_FILES
+        self.can_write()
+            && !self.preview
+            && self.selected_room().is_some_and(|room| room.can_attach())
+            && self.staged().len() < chat::MAX_FILES
     }
 
     /// Why files dropped on the window can't go with the next message, if
@@ -3897,7 +3900,13 @@ impl Application {
                 if self.state.busy || self.state.preview || self.state.account.is_none() {
                     vec![]
                 } else {
-                    vec![Effect::Backend(Command::RetrySync)]
+                    // Matrix restarts its sync; a Discord account starts its
+                    // session again. Each network ignores the other's command,
+                    // so one button serves a build of either or both.
+                    vec![
+                        Effect::Backend(Command::RetrySync),
+                        Effect::Backend(Command::RetryDiscord),
+                    ]
                 }
             }
             Action::Logout => self.logout(),

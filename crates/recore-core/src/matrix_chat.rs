@@ -865,6 +865,7 @@ impl Matrix {
                 });
             }
             Command::RetrySync => self.restart_sync = true,
+            Command::RetryDiscord => {}
             Command::Logout => {
                 voice.stop().await;
                 if let Some(previous) = self.sync.take() {
@@ -1207,6 +1208,7 @@ async fn room_index(client: &Client) -> RoomIndex {
                 .map(|receipt| format!("e:{}", receipt.event_id)),
             locked: false,
             join_locked: false,
+            permissions: None,
             read_only: false,
             reacts: Reacts::Any,
             slowed: false,

@@ -88,6 +88,10 @@ pub struct ChatRoom {
     /// Readable, but this account may not send here, such as a Discord
     /// announcement channel.
     pub read_only: bool,
+    /// What this account may do in the room's Discord channel, when the
+    /// server's roles are known; `None` when they aren't, and for a room of
+    /// another network.
+    pub permissions: Option<u64>,
     /// What reacting this account may do here, which a Discord channel
     /// decides apart from sending: a read-only channel may still take
     /// reactions.
@@ -159,11 +163,29 @@ pub struct ChatRoom {
     pub voice_started: Option<u64>,
 }
 
+/// Discord's `ATTACH_FILES`: uploading files with a message.
+pub const ATTACH_FILES: u64 = 1 << 15;
+
+/// Discord's `EMBED_LINKS`: a link in a message making its preview card.
+/// Without it Discord still sends the message, just without the card.
+pub const EMBED_LINKS: u64 = 1 << 14;
+
 impl ChatRoom {
     /// It has messages: every room but a Matrix voice room, as a Discord
     /// voice channel has a chat beside its call.
     pub fn has_text(&self) -> bool {
         !self.voice || self.network == Network::Discord
+    }
+
+    /// Whether this account may upload files with a message here. A room
+    /// whose permissions aren't known allows it, as before they were read.
+    pub fn can_attach(&self) -> bool {
+        self.permissions.is_none_or(|bits| bits & ATTACH_FILES != 0)
+    }
+
+    /// Whether a link in a message here makes its preview card.
+    pub fn can_embed(&self) -> bool {
+        self.permissions.is_none_or(|bits| bits & EMBED_LINKS != 0)
     }
 
     /// A voice channel with a chat beside its call that this account may
@@ -2731,6 +2753,8 @@ pub enum Command {
     Recover(String),
     RefreshTrust,
     RetrySync,
+    /// Start the linked Discord account's session again, as Reconnect does.
+    RetryDiscord,
     Logout,
 }
 
@@ -4774,6 +4798,7 @@ impl Command {
             },
             Command::StartDm { discord: true, .. } => Route::Discord,
             Command::StartDm { discord: false, .. } => Route::Matrix,
+            Command::RetryDiscord => Route::Discord,
             // Signing out of a build without Matrix unlinks Discord instead.
             Command::Recover(_) | Command::RefreshTrust | Command::RetrySync | Command::Logout => {
                 Route::Matrix
@@ -6205,6 +6230,44 @@ pub async fn run(
                             discord.service().set_attachment_privacy(attachment_privacy);
                         }
                     }
+                    Command::RetryDiscord => {
+                        // The saved login, or the token this session started
+                        // with when the account id isn't known yet.
+                        let account = discord_account
+                            .clone()
+                            .or_else(recore_discord::token::current_account);
+                        match account.map(|account| {
+                            switch_discord(
+                                &mut discord,
+                                &linked,
+                                &voice,
+                                &account,
+                                attachment_privacy,
+                            )
+                        }) {
+                            Some(Ok(())) => {
+                                discord_error = None;
+                                // A reconnect keeps the same account: its
+                                // snapshots refill what `DiscordSwitched`
+                                // would clear, so that event stays for a
+                                // switch to another one.
+                                if let Some(discord) = &discord {
+                                    discord.service().set_attachment_privacy(attachment_privacy);
+                                }
+                            }
+                            Some(Err(error)) => {
+                                let error = discord_failed(&error);
+                                let _ = events.send(Event::Error(error.clone()));
+                                discord_error = Some(error);
+                            }
+                            None => {
+                                let error =
+                                    "Discord has no saved login to reconnect with.".to_owned();
+                                let _ = events.send(Event::Error(error.clone()));
+                                discord_error = Some(error);
+                            }
+                        }
+                    }
                     Command::Discord(DiscordCommand::Start) => {
                         if discord.is_none() {
                             // Linking saved the login just before.
@@ -6499,6 +6562,7 @@ mod tests {
             silent: false,
         };
         for (command, route) in [
+            (Command::RetryDiscord, Route::Discord),
             (Command::Open(matrix.clone()), Route::Every),
             (Command::Open(discord.clone()), Route::Every),
             (Command::CloseRoom, Route::Every),
