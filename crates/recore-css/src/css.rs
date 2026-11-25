@@ -922,11 +922,18 @@ fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
     }
     let Some((name, value)) = feature.split_once(':') else {
         // A boolean feature, such as `(hover)` or `(color)`, applies when the
-        // window has the thing at all. The zero-valued ones do not.
-        return !matches!(
-            feature.trim().to_ascii_lowercase().as_str(),
-            "monochrome" | "grid" | "color-index"
-        );
+        // window has the thing at all. The zero-valued ones do not. Anything
+        // that is not a feature's own name — a stray operator, punctuation —
+        // is a malformed condition, which no window matches.
+        let name = feature.trim().to_ascii_lowercase();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return false;
+        }
+        return !matches!(name.as_str(), "monochrome" | "grid" | "color-index");
     };
     let name = name.trim().to_ascii_lowercase();
     let value = value.trim().to_ascii_lowercase();
@@ -981,13 +988,7 @@ fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
 }
 
 fn media_range(feature: &str) -> Option<bool> {
-    let normalized = feature
-        .replace(">=", " >= ")
-        .replace("<=", " <= ")
-        .replace('>', " > ")
-        .replace('<', " < ")
-        .replace('=', " = ");
-    let words: Vec<&str> = normalized.split_whitespace().collect();
+    let words = range_words(feature);
     if !(3..=5).contains(&words.len()) {
         return None;
     }
@@ -1026,13 +1027,51 @@ fn media_range(feature: &str) -> Option<bool> {
     None
 }
 
+/// A range condition split into its parts, a comparison kept whole:
+/// `(400px <= width <= 1000px)` gives `["400px", "<=", "width", "<=",
+/// "1000px"]`. Spacing beside an operator is optional, as CSS allows.
+fn range_words(feature: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let bytes = feature.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let start = index;
+        if matches!(bytes[index], b'<' | b'>' | b'=') {
+            index += 1;
+            if index < bytes.len() && bytes[index] == b'=' && bytes[start] != b'=' {
+                index += 1;
+            }
+            words.push(&feature[start..index]);
+            continue;
+        }
+        while index < bytes.len()
+            && !bytes[index].is_ascii_whitespace()
+            && !matches!(bytes[index], b'<' | b'>' | b'=')
+        {
+            index += 1;
+        }
+        words.push(&feature[start..index]);
+    }
+    words
+}
+
 fn feature_value(name: &str) -> Option<f32> {
     match name.to_ascii_lowercase().as_str() {
-        "width" | "device-width" => Some(width()),
-        "height" | "device-height" => Some(height()),
-        "aspect-ratio" | "device-aspect-ratio" => Some(viewport_ratio()),
-        "resolution" => Some(1.0),
-        "color" => Some(8.0),
+        "width" | "device-width" | "min-width" | "max-width" | "min-device-width"
+        | "max-device-width" => Some(width()),
+        "height" | "device-height" | "min-height" | "max-height" | "min-device-height"
+        | "max-device-height" => Some(height()),
+        "aspect-ratio" | "device-aspect-ratio" | "min-aspect-ratio" | "max-aspect-ratio" => {
+            Some(viewport_ratio())
+        }
+        "resolution" | "min-resolution" | "max-resolution" => Some(1.0),
+        "color" | "min-color" | "max-color" => Some(8.0),
         "color-index" | "monochrome" | "grid" => Some(0.0),
         _ => None,
     }
@@ -1040,9 +1079,13 @@ fn feature_value(name: &str) -> Option<f32> {
 
 fn feature_number(feature: &str, value: &str) -> Option<f32> {
     match feature.to_ascii_lowercase().as_str() {
-        "aspect-ratio" | "device-aspect-ratio" => ratio(value),
-        "resolution" => resolution(value),
-        "color" | "color-index" | "monochrome" | "grid" => media_number(value),
+        "aspect-ratio" | "device-aspect-ratio" | "min-aspect-ratio" | "max-aspect-ratio" => {
+            ratio(value)
+        }
+        "resolution" | "min-resolution" | "max-resolution" => resolution(value),
+        "color" | "color-index" | "monochrome" | "grid" | "min-color" | "max-color" => {
+            media_number(value)
+        }
         _ => media_length(value),
     }
 }
@@ -2666,6 +2709,34 @@ mod tests {
             .map(|rule| rule.selectors[0].as_str())
             .collect();
         assert_eq!(selected, [".wide", ".mouse"]);
+    }
+
+    #[test]
+    fn a_range_media_query_measures_the_reference_window() {
+        // MQ4 §2.4: `<=`, `>=`, `<`, `>` and `=`, with or without spaces
+        // beside them, and either side naming the feature.
+        let applies = |query: &str| media_applies(&format!("({query})"));
+        assert!(applies("width >= 1000px"));
+        assert!(applies("width>=1000px"));
+        assert!(applies("1000px <= width"));
+        assert!(applies("1280px = width"));
+        assert!(applies("400px <= width <= 2000px"));
+        assert!(applies("2000px >= width >= 400px"));
+        assert!(applies("400px < width < 2000px"));
+        assert!(!applies("width < 1000px"));
+        assert!(!applies("width <= 1000px"));
+        assert!(!applies("1000px >= width"));
+        assert!(!applies("width > 2000px"));
+        assert!(!applies("400px <= width <= 1000px"));
+        assert!(!applies("1000px >= width >= 400px"));
+        assert!(applies("min-height <= 720px"));
+        assert!(applies("height <= 720px"));
+        assert!(!applies("height <= 100px"));
+        // A condition with no feature, or an operator without a side, is no
+        // condition and keeps a theme's rule out.
+        assert!(!applies("<= 1000px"));
+        assert!(!applies("width <="));
+        assert!(!applies("bogus-feature >= 1"));
     }
 
     #[test]
