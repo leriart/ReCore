@@ -38,6 +38,7 @@ use crate::{
     app::Message,
     controls::{self, bar},
     ctx::{self, Ctx, Cx, Focus, Request, Screen},
+    elide::elide,
     fonts::BOLD,
     form,
     pictures::Icon,
@@ -558,11 +559,10 @@ impl<'a> Page<'a> {
         let account = self.cx.account;
         let linked = self.linked();
         let mut names = column![
-            text(account.name.as_str())
+            elide(account.name.as_str())
                 .size(15)
                 .font(BOLD())
                 .color(theme.text)
-                .wrapping(text::Wrapping::None)
         ]
         .spacing(4);
         if linked {

@@ -504,13 +504,17 @@ pub fn open_picker(app: &mut App, target: Target, tab: Tab) -> Task<Message> {
     app.win.menu = None;
     let tabs = target == Target::Composer && app.client.state().can_pick_gifs();
     let tab = if tabs { tab } else { Tab::Emoji };
+    // A room narrower than the picker's own width shrinks the picker rather
+    // than letting it hang off the window.
+    let room = picker_room(app);
     let width = if tabs {
         app.layout
             .picker_width
             .unwrap_or(WIDTH)
-            .clamp(WIDTH, picker_room(app))
+            .max(WIDTH)
+            .min(room)
     } else {
-        WIDTH
+        WIDTH.min(room)
     };
     let mut cx = cx!(app);
     let task = match app.win.picker.get_mut() {
@@ -601,8 +605,14 @@ pub fn place_emoji(app: &mut App, target: Target, key: String) -> Task<Message> 
 /// the emoji button, to 8 px right of the server rail, or 8 px from the
 /// window's own edge if that comes first.
 pub fn picker_room(app: &App) -> f32 {
+    // The room from the picker's left edge to the window's right edge, less
+    // what the panels on the right take. It may be narrower than the
+    // picker's own width on a small window; clamping the *result* up to
+    // WIDTH put the picker's right edge past the window's, so it was drawn
+    // off the left edge.
     let right = crate::conversation::chat_right(app) - 8.0 - 4.0;
-    (app.window.width - 88.0).min(right - 80.0).max(WIDTH)
+    let room = (app.window.width - 88.0).min(right - 80.0);
+    room.max(1.0)
 }
 
 /// The picker, framed, with its tabs when it has them.
