@@ -21,12 +21,20 @@ fn survives(name: &str, css: String) {
             let _ = done.send(());
         })
         .expect("a thread");
+    // A debug build reads a damaged 447 KiB theme several times slower than
+    // an optimized one; the check is that the reader ends at all, not how
+    // fast it is, so it gets a budget that fits the build.
+    let (wait, total) = if cfg!(debug_assertions) {
+        (Duration::from_secs(90), Duration::from_secs(180))
+    } else {
+        (Duration::from_secs(10), Duration::from_secs(20))
+    };
     assert!(
-        waited.recv_timeout(Duration::from_secs(10)).is_ok(),
-        "{label}: still running after 10s"
+        waited.recv_timeout(wait).is_ok(),
+        "{label}: still running after {wait:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(20),
+        started.elapsed() < total,
         "{label}: took {:?}",
         started.elapsed()
     );
@@ -158,8 +166,13 @@ fn hostile_inputs_are_read_without_a_panic() {
 
 #[test]
 fn a_bundled_theme_cut_anywhere_is_read_without_a_panic() {
+    // A debug build reads a 447 KiB theme about ten times slower than an
+    // optimized one, so it samples fewer cuts: the check is that no cut
+    // panics, and the optimized runs (the `fast` profile, `--release`) keep
+    // the full sweep.
+    let cuts = if cfg!(debug_assertions) { 24 } else { 120 };
     for (name, css) in bundled() {
-        let step = (css.len() / 120).max(1);
+        let step = (css.len() / cuts).max(1);
         let mut at = 0;
         while at < css.len() {
             if css.is_char_boundary(at) {
@@ -207,8 +220,9 @@ fn a_bundled_theme_with_random_damage_is_read_without_a_panic() {
         "]",
     ];
     let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
+    let rounds = if cfg!(debug_assertions) { 6 } else { 24 };
     for (name, css) in bundled() {
-        for round in 0..24 {
+        for round in 0..rounds {
             let mut damaged = css.clone();
             for _ in 0..1 + dice.roll(12) {
                 let mut at = dice.roll(damaged.len());

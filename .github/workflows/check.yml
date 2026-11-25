@@ -20,20 +20,10 @@ jobs:
       - name: CSS interpreter tests
         run: cargo test -p recore-css --locked
 
-  # The Discord protocol and the window's kit have no C build of their own
-  # (no x264/FFmpeg, so no NASM), so their tests run here beside the
-  # interpreter's. The window itself needs the core, whose vendored encoders
-  # do need NASM; `scripts/check --fast` covers it on a development machine.
-  discord:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: rustfmt
-      - name: Discord protocol tests
-        run: cargo test -p recore-discord --locked
-
+  # The Discord protocol and the core build libwebrtc and the vendored
+  # encoders, which need the development shell (a C++ toolchain and NASM), so
+  # `scripts/check --fast` covers them on a development machine. The window
+  # kit builds without them and runs here.
   kit:
     runs-on: ubuntu-latest
     steps:
