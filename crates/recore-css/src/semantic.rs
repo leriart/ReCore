@@ -9,9 +9,11 @@
 //!
 //! The work happens once, when a theme is loaded. The window still paints
 //! with iced. The engine's optional taffy/parley pass is for the phase that
-//! paints a CSS layout; it is not on the theme-load path. `em`, `rem`,
-//! `calc()` and viewport units still settle through the engine's computed
-//! lengths, rather than being guessed from the declaration text.
+//! paints a CSS layout; it is not on the theme-load path. `em` and the
+//! viewport units settle through the engine's computed lengths. `rem` is
+//! rewritten against the page's own root size, and the values the engine
+//! rejects — `calc()` in `opacity`, a `calc()` duration, `round()` and
+//! `abs()` lengths — are settled here before it reads the stylesheet.
 
 use std::{
     borrow::Cow,
@@ -176,6 +178,9 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
     // is left for the engine, which knows the region's own value; resolving
     // it here would read only the root's.
     let regions = region_vars(sheet, dark);
+    // The engine resolves `rem` against 16 px; the theme's own page size is
+    // what its `rem` lengths mean.
+    let root = crate::theme::root_font_size(sheet, dark);
     let mut out = String::new();
     let layers: Vec<&str> = sheet
         .layers
@@ -254,6 +259,12 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
             // `colors` fills a `var()` in from the settled root values, which
             // may carry a unit of their own; the engine reads the result too.
             let value = css::normalize_units(&value);
+            // `rem` and the values `style-engine` 1.0.0 rejects settle here.
+            let value = rem_to_px(&value, root);
+            // `env()` names a device's notch or margin, which a window has
+            // none of; the fallback a theme writes is what it meant.
+            let value = resolve_env(&value);
+            let value = declaration_value(&declaration.name, &value);
             if value.len() > 4096 || value.contains("data:") {
                 continue;
             }
@@ -271,6 +282,323 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
         }
     }
     out
+}
+
+/// The declarations `style-engine` 1.0.0 cannot settle but this reader can:
+/// `opacity` as a plain fraction, a duration as milliseconds, and a complete
+/// length function such as `round()` or `abs()` as pixels.
+/// Every `env(name, fallback)` replaced by its fallback, innermost first.
+/// An `env()` without one stays as written and the engine drops it.
+fn resolve_env(value: &str) -> Cow<'_, str> {
+    let mut out = String::new();
+    let mut rest = value;
+    let mut changed = false;
+    while let Some(start) = css::find_ignore_case(rest, "env(") {
+        let after = &rest[start + 4..];
+        let Some(end) = css::matching_paren(after) else {
+            break;
+        };
+        let inside = &after[..end];
+        out.push_str(&rest[..start]);
+        let fallback = inside.split_once(',').map(|(_, fallback)| fallback.trim());
+        match fallback {
+            Some(fallback) => {
+                out.push_str(&resolve_env(fallback));
+                changed = true;
+            }
+            None => out.push_str(&rest[start..start + 4 + end + 1]),
+        }
+        rest = &after[end + 1..];
+    }
+    if !changed {
+        return Cow::Borrowed(value);
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+fn declaration_value<'a>(name: &str, value: &'a str) -> Cow<'a, str> {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case("opacity") {
+        return opacity_value(value);
+    }
+    if name.eq_ignore_ascii_case("transition-duration")
+        || name.eq_ignore_ascii_case("animation-duration")
+    {
+        return duration_value(value);
+    }
+    match length_value(value) {
+        Some(length) => Cow::Owned(format!("{}px", format_px(length))),
+        None => Cow::Borrowed(value),
+    }
+}
+
+/// `opacity` as a number, from `0.5`, `50%` or `calc(1 / 2)`. A value outside
+/// 0..1 is left alone: the engine's own handling of it is what the window
+/// reads today.
+fn opacity_value(value: &str) -> Cow<'_, str> {
+    let text = value.trim();
+    let number = match text.strip_suffix('%') {
+        Some(percent) => crate::theme::eval_number(percent).map(|percent| percent / 100.0),
+        None => crate::theme::eval_number(text),
+    };
+    match number {
+        Some(number) if (0.0..=1.0).contains(&number) => {
+            Cow::Owned(format_px(if number == 0.0 { 0.0 } else { number }))
+        }
+        _ => Cow::Borrowed(value),
+    }
+}
+
+/// A duration as milliseconds, from `150ms`, `0.15s` or a `calc()` the engine
+/// rejects.
+fn duration_value(value: &str) -> Cow<'_, str> {
+    match crate::theme::eval_time_ms(value.trim()) {
+        Some(milliseconds) => Cow::Owned(format!("{}ms", format_px(milliseconds))),
+        None => Cow::Borrowed(value),
+    }
+}
+
+/// The maths functions a complete declaration value may be. The engine knows
+/// the first four; `round()` and `abs()` settle here.
+const LENGTH_FUNCTIONS: [&str; 6] = ["calc(", "min(", "max(", "clamp(", "round(", "abs("];
+
+/// A complete `calc()`/`min()`/`max()`/`clamp()`/`round()`/`abs()` value in
+/// pixels. A percentage needs the box, and an `em` needs the element's
+/// inherited size, which is unknown here; both are left for the engine.
+fn length_value(value: &str) -> Option<f32> {
+    let text = value.trim();
+    let lower = text.to_ascii_lowercase();
+    if !LENGTH_FUNCTIONS
+        .iter()
+        .any(|function| lower.starts_with(function))
+    {
+        return None;
+    }
+    if has_unit(&lower, "em") || !has_unit(&lower, "px") {
+        return None;
+    }
+    crate::theme::eval_length(text)
+}
+
+/// Whether `unit` follows a number in `value`, as `1.5em` or `12px` does and
+/// a custom-property name such as `--theme` does not.
+fn has_unit(value: &str, unit: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while let Some(offset) = value[index..].find(unit) {
+        let at = index + offset;
+        let before = at
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .copied();
+        let after = bytes.get(at + unit.len()).copied();
+        let number = before.is_some_and(|byte| byte.is_ascii_digit() || byte == b'.');
+        let boundary = after.is_none_or(|byte| !name_byte(byte));
+        if number && boundary {
+            return true;
+        }
+        index = at + unit.len();
+    }
+    false
+}
+
+/// Rewrites every `rem` length as pixels at the page's root font size.
+/// `style-engine` 1.0.0 always resolves `rem` against 16 px, while a theme
+/// that writes `html { font-size: 10px }` means a smaller step.
+fn rem_to_px(value: &str, root: f32) -> Cow<'_, str> {
+    let bytes = value.as_bytes();
+    if !bytes
+        .windows(3)
+        .any(|window| window.eq_ignore_ascii_case(b"rem"))
+    {
+        return Cow::Borrowed(value);
+    }
+    let mut out: Option<String> = None;
+    let mut written = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => index = skip_quoted(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => index = skip_comment(bytes, index),
+            b'u' | b'U' if starts_url(bytes, index) => index = skip_url(bytes, index),
+            _ => match rem_length(value, index, root) {
+                Some((end, pixels)) => {
+                    let output = out.get_or_insert_with(|| String::with_capacity(value.len()));
+                    output.push_str(&value[written..index]);
+                    output.push_str(&format_px(pixels));
+                    output.push_str("px");
+                    written = end;
+                    index = end;
+                }
+                None => index += 1,
+            },
+        }
+    }
+    match out {
+        Some(mut output) => {
+            output.push_str(&value[written..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(value),
+    }
+}
+
+/// The end and pixel value of the `rem` length starting at `start`.
+fn rem_length(text: &str, start: usize, root: f32) -> Option<(usize, f32)> {
+    let bytes = text.as_bytes();
+    if start > 0 && name_byte(bytes[start - 1]) {
+        return None;
+    }
+    let mut index = start;
+    let sign = match bytes.get(index) {
+        Some(b'+') => {
+            index += 1;
+            1.0
+        }
+        Some(b'-') => {
+            index += 1;
+            -1.0
+        }
+        _ => 1.0,
+    };
+    let number_start = index;
+    let mut digits = 0usize;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+        digits += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    // An exponent, as in `1e3rem`; a unit starting with `e` is not one.
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let mut cursor = index + 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        let exponent_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor > exponent_start {
+            index = cursor;
+        }
+    }
+    let number_end = index;
+    if !bytes
+        .get(index..index + 3)
+        .is_some_and(|unit| unit.eq_ignore_ascii_case(b"rem"))
+    {
+        return None;
+    }
+    index += 3;
+    if bytes.get(index).is_some_and(|byte| name_byte(*byte)) {
+        return None;
+    }
+    let number = text.get(number_start..number_end)?.parse::<f32>().ok()?;
+    let pixels = sign * number * root;
+    pixels.is_finite().then_some((index, pixels))
+}
+
+/// Whether `byte` continues a CSS identifier, so a number touching it is not
+/// a length of its own.
+fn name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || !byte.is_ascii()
+}
+
+/// The byte after the quoted string that starts at `start`.
+fn skip_quoted(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the comment that starts at `start`.
+fn skip_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// Whether `url(` starts at `start`, as its own token.
+fn starts_url(bytes: &[u8], start: usize) -> bool {
+    if start > 0 && name_byte(bytes[start - 1]) {
+        return false;
+    }
+    bytes
+        .get(start..start + 4)
+        .is_some_and(|word| word.eq_ignore_ascii_case(b"url("))
+}
+
+/// The byte after the `url(...)` that starts at `start`.
+fn skip_url(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 3;
+    let mut depth = 0u32;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(_) if byte == b'\\' => index += 2,
+            Some(active) if byte == active => {
+                quote = None;
+                index += 1;
+            }
+            Some(_) => index += 1,
+            None => match byte {
+                b'"' | b'\'' => {
+                    quote = Some(byte);
+                    index += 1;
+                }
+                b'(' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    index += 1;
+                    if depth == 0 {
+                        return index;
+                    }
+                }
+                _ => index += 1,
+            },
+        }
+    }
+    bytes.len()
+}
+
+/// A pixel count with at most four decimals and no trailing zeros.
+fn format_px(value: f32) -> String {
+    let mut text = format!("{value:.4}");
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    text
 }
 
 /// The custom properties declared by rules that name a region rather than
@@ -328,6 +656,11 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
     let mut changed = false;
     let mut index = 0;
     let mut quote: Option<char> = None;
+    // An element's name and an attribute's are read without regard to case
+    // in HTML; a class and an id keep theirs. The engine compares them as
+    // written, so `BODY` and `[CLASS*=…]` are lowered here, and an `i` flag
+    // on an attribute value lowercases the value it compares.
+    let mut compound_start = true;
     let bytes = selector.as_bytes();
     while index < bytes.len() {
         let character = selector[index..].chars().next().unwrap_or_default();
@@ -344,6 +677,46 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
                 quote = Some(character);
                 out.push(character);
                 index += 1;
+            }
+            '[' => {
+                let end = matching_bracket(selector, index).unwrap_or(bytes.len());
+                let inside = selector.get(index + 1..end).unwrap_or_default();
+                let lowered = lowercase_attribute(inside);
+                out.push('[');
+                out.push_str(&lowered);
+                if end < bytes.len() {
+                    out.push(']');
+                }
+                changed |= lowered != inside;
+                index = end + 1;
+                compound_start = false;
+            }
+            '>' | '+' | '~' | ',' | '(' => {
+                out.push(character);
+                compound_start = true;
+                index += character.len_utf8();
+            }
+            ' ' | '\t' | '\n' => {
+                out.push(character);
+                compound_start = true;
+                index += 1;
+            }
+            character
+                if compound_start
+                    && character.is_ascii_alphabetic()
+                    && !selector[..index].ends_with(':') =>
+            {
+                let start = index;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    index += 1;
+                }
+                let name = &selector[start..index];
+                out.push_str(&name.to_ascii_lowercase());
+                changed |= name.bytes().any(|byte| byte.is_ascii_uppercase());
+                compound_start = false;
             }
             '.' => {
                 out.push('.');
@@ -368,10 +741,12 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
                     }
                     None => out.push_str(class),
                 }
+                compound_start = false;
             }
             _ => {
                 out.push(character);
                 index += character.len_utf8();
+                compound_start = false;
             }
         }
     }
@@ -379,6 +754,66 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
         Cow::Owned(out)
     } else {
         Cow::Borrowed(selector)
+    }
+}
+
+/// The byte of the `]` that closes the `[` at `start`, respecting quotes.
+fn matching_bracket(selector: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, character) in selector[start + 1..].char_indices() {
+        match quote {
+            Some(active) if character == active => quote = None,
+            Some(_) => {}
+            None => match character {
+                '"' | '\'' => quote = Some(character),
+                ']' => return Some(start + 1 + offset),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// An attribute selector's inside with its name lowered, and its value
+/// lowered too when the `i` flag asks for a case-insensitive comparison.
+fn lowercase_attribute(inside: &str) -> String {
+    const OPERATORS: [&str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+    let operator = OPERATORS
+        .iter()
+        .filter_map(|operator| inside.find(operator).map(|at| (at, *operator)))
+        .min_by_key(|(at, _)| *at);
+    let Some((at, operator)) = operator else {
+        return inside.to_ascii_lowercase();
+    };
+    let name = inside[..at].trim().to_ascii_lowercase();
+    let rest = inside[at + operator.len()..].trim_start();
+    let (value, after) = split_attribute_value(rest);
+    let insensitive = after.trim().eq_ignore_ascii_case("i");
+    let value = if insensitive {
+        value.to_ascii_lowercase()
+    } else {
+        value.to_owned()
+    };
+    let flag = if after.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" {}", after.trim())
+    };
+    format!("{name}{operator}{value}{flag}")
+}
+
+/// An attribute value and whatever follows it: a quoted value ends at its
+/// closing quote, an unquoted one at whitespace.
+fn split_attribute_value(text: &str) -> (&str, &str) {
+    match text.as_bytes().first() {
+        Some(&quote @ (b'"' | b'\'')) => match text[1..].find(quote as char) {
+            Some(offset) => (&text[..offset + 2], &text[offset + 2..]),
+            None => (text, ""),
+        },
+        _ => match text.find(char::is_whitespace) {
+            Some(at) => (&text[..at], &text[at..]),
+            None => (text, ""),
+        },
     }
 }
 
@@ -442,6 +877,9 @@ fn active_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
                 || selector.contains(" > ")
                 || selector.contains(" + ")
                 || selector.contains(" ~ ")
+                // An attribute on its own names no class, so the pruning
+                // below would leave the nodes that carry it out.
+                || (selector.contains('[') && selector.contains(']'))
             {
                 roles.extend(NODES.iter().map(|node| node.role));
                 break;
@@ -1355,7 +1793,11 @@ fn color_prop(computed: &ComputedStyle, property: PropertyId, dark: bool) -> Opt
 }
 
 fn line(computed: &ComputedStyle, dark: bool) -> Option<Rgba> {
-    let mut found = None;
+    // A side styled but left at `currentColor` does not colour the line when
+    // another side names a colour: `border-style: solid` on all four sides
+    // and `border-bottom-color: red` is a red line, not the text's ink.
+    let mut explicit = None;
+    let mut current = None;
     for (color_property, style_property) in [
         (PropertyId::BorderTopColor, Some(PropertyId::BorderTopStyle)),
         (
@@ -1370,6 +1812,22 @@ fn line(computed: &ComputedStyle, dark: bool) -> Option<Rgba> {
             PropertyId::BorderLeftColor,
             Some(PropertyId::BorderLeftStyle),
         ),
+        (
+            PropertyId::BorderInlineStartColor,
+            Some(PropertyId::BorderInlineStartStyle),
+        ),
+        (
+            PropertyId::BorderInlineEndColor,
+            Some(PropertyId::BorderInlineEndStyle),
+        ),
+        (
+            PropertyId::BorderBlockStartColor,
+            Some(PropertyId::BorderBlockStartStyle),
+        ),
+        (
+            PropertyId::BorderBlockEndColor,
+            Some(PropertyId::BorderBlockEndStyle),
+        ),
         (PropertyId::OutlineColor, Some(PropertyId::OutlineStyle)),
     ] {
         let Some(DeclValue::Color(value)) = computed.value(color_property) else {
@@ -1382,14 +1840,18 @@ fn line(computed: &ComputedStyle, dark: bool) -> Option<Rgba> {
             }
             _ => false,
         });
-        if matches!(value, ColorValue::CurrentColor) && !styled {
+        let Some(color) = color(*value, computed, dark).filter(|color| color.a > 0) else {
             continue;
-        }
-        if let Some(color) = color(*value, computed, dark).filter(|color| color.a > 0) {
-            found = Some(color);
+        };
+        if matches!(value, ColorValue::CurrentColor) {
+            if styled {
+                current = Some(color);
+            }
+        } else {
+            explicit = Some(color);
         }
     }
-    found
+    explicit.or(current)
 }
 
 /// Whether a pseudo-element generates text. A panel label's gradient is not
@@ -1467,18 +1929,21 @@ fn shadow(computed: &ComputedStyle, dark: bool) -> Option<Shadow> {
 }
 
 fn motion(style: &mut NativeStyle, computed: &ComputedStyle) {
+    // The window's popups move for at most two seconds; a longer declaration
+    // is clipped rather than dropped.
+    const MAX_MOTION_SECONDS: f32 = 2.0;
     let transition = match computed.value(PropertyId::TransitionDuration) {
         Some(DeclValue::TransitionTime(list)) => list
             .0
             .first()
             .copied()
-            .filter(|seconds| *seconds > 0.0 && *seconds <= 2.0)
+            .filter(|seconds| *seconds > 0.0)
             .map(|seconds| {
                 let timing = match computed.value(PropertyId::TransitionTimingFunction) {
                     Some(DeclValue::TransitionTiming(list)) => list.0.first().copied(),
                     _ => None,
                 };
-                (seconds, timing)
+                (seconds.min(MAX_MOTION_SECONDS), timing)
             }),
         _ => None,
     };
@@ -1486,13 +1951,13 @@ fn motion(style: &mut NativeStyle, computed: &ComputedStyle) {
         Some(DeclValue::AnimationTimeList(list)) => list
             .first()
             .copied()
-            .filter(|seconds| *seconds > 0.0 && *seconds <= 2.0)
+            .filter(|seconds| *seconds > 0.0)
             .map(|seconds| {
                 let timing = match computed.value(PropertyId::AnimationTimingFunction) {
                     Some(DeclValue::AnimationTimingList(list)) => list.first().copied(),
                     _ => None,
                 };
-                (seconds, timing)
+                (seconds.min(MAX_MOTION_SECONDS), timing)
             }),
         _ => None,
     };
@@ -1660,6 +2125,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_selector_lowers_element_and_attribute_names_but_not_classes() {
+        let sheet = crate::css::parse(
+            r#"BODY [CLASS*="Sidebar_"] .MixedCase { color: red }"#,
+            |_, _| None,
+        );
+        let css = to_css(&sheet, &crate::css::Vars::default(), true, &BTreeSet::new());
+        assert!(
+            css.contains(r#"body [class*="Sidebar_"] .MixedCase"#),
+            "{css}"
+        );
+    }
+
+    #[test]
+    fn an_attribute_case_flag_lowers_the_value_it_compares() {
+        let sheet = crate::css::parse(r#"[role="MENU" i] { color: red }"#, |_, _| None);
+        let css = to_css(&sheet, &crate::css::Vars::default(), true, &BTreeSet::new());
+        assert!(css.contains(r#"[role="menu" i]"#), "{css}");
+    }
+
+    #[test]
     fn to_css_writes_lengths_in_pixels() {
         let sheet = crate::css::parse(
             r#"[class*="category_"] { font-size: 9pt; border-radius: 1vmin; }"#,
@@ -1687,5 +2172,55 @@ mod tests {
         let css = to_css(&sheet, &vars, true, &used);
         assert!(css.contains("font-size:12px;"), "{css}");
         assert!(css.contains("--size:12px;"), "{css}");
+    }
+
+    fn dark(css: &str) -> crate::ThemeFile {
+        crate::load_str(css, None, &crate::Options::with_mode(crate::Mode::Dark)).expect("theme")
+    }
+
+    #[test]
+    fn an_opacity_percentage_or_calculation_settles_to_a_fraction() {
+        let theme = dark(r#"[class*="sidebar_"] { opacity: 50%; }"#);
+        assert_eq!(theme.native.sidebar_opacity, Some(0.5));
+
+        let theme = dark(r#"[class*="sidebar_"] { opacity: calc(1 / 2); }"#);
+        assert_eq!(theme.native.sidebar_opacity, Some(0.5));
+    }
+
+    #[test]
+    fn a_duration_calculation_reaches_the_popup_in_milliseconds() {
+        let theme = dark(r#"[class*="menu_"] { transition-duration: calc(100ms + 50ms); }"#);
+        assert_eq!(theme.native.motion_ms, Some(150));
+
+        let theme = dark(r#"[class*="menu_"] { animation-duration: calc(0.1s * 2); }"#);
+        assert_eq!(theme.native.motion_ms, Some(200));
+    }
+
+    #[test]
+    fn rem_lengths_follow_the_pages_font_size() {
+        let theme = dark(
+            r#"html { font-size: 10px; }
+               [class*="category_"] { font-size: 1.2rem; }"#,
+        );
+        assert_eq!(theme.native.category_size, Some(12.0));
+
+        // With no page rule the root is the engine's 16px.
+        let theme = dark(r#"[class*="category_"] { font-size: 0.75rem; }"#);
+        assert_eq!(theme.native.category_size, Some(12.0));
+    }
+
+    #[test]
+    fn round_and_abs_lengths_settle_before_the_engine() {
+        let theme = dark(r#"[class*="category_"] { font-size: round(12.4px, 1px); }"#);
+        assert_eq!(theme.native.category_size, Some(12.0));
+
+        let theme = dark(r#"[class*="category_"] { font-size: abs(-12px); }"#);
+        assert_eq!(theme.native.category_size, Some(12.0));
+    }
+
+    #[test]
+    fn a_duration_longer_than_two_seconds_is_clipped() {
+        let theme = dark(r#"[class*="menu_"] { transition-duration: 3s; }"#);
+        assert_eq!(theme.native.motion_ms, Some(2000));
     }
 }
