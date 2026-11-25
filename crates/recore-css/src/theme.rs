@@ -3087,6 +3087,29 @@ html.theme-light:not([data-rl-mode="dark"]) {
     }
 
     #[test]
+    fn a_layer_statement_fixes_the_order_of_later_blocks() {
+        // The statement names `a` before `b`, so `b` wins, even though the
+        // block for `b` is written first. A browser and the engine both hold
+        // to the statement; `style-engine` needs the names alone, as it skips
+        // a list.
+        let css = r#"
+        @layer a, b;
+        @layer b { :root { --background-primary: #111111; } }
+        @layer a { :root { --background-primary: #222222; } }
+        "#;
+        let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x11, 0x11, 0x11));
+
+        // Without the statement the order is the blocks' own.
+        let css = r#"
+        @layer b { :root { --background-primary: #111111; } }
+        @layer a { :root { --background-primary: #222222; } }
+        "#;
+        let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x22, 0x22, 0x22));
+    }
+
+    #[test]
     fn auto_picks_dark_for_a_dark_ground_and_light_for_a_light_one() {
         let dark = load_str(
             ":root{--background-primary:#111;--text-normal:#eee}",

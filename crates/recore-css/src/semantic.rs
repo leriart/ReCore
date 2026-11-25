@@ -174,15 +174,20 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
         .map(String::as_str)
         .filter(|name| !name.is_empty())
         .collect();
-    if !layers.is_empty() {
+    // `style-engine` 1.0.0 skips `@layer a, b;` (it reports it as an invalid
+    // rule), so each name is declared on its own and then given an empty
+    // block, in the order the theme first named it. The blocks register the
+    // layer order before any rule is read; a theme that lists its layers
+    // ahead of their rules keeps that order.
+    for name in &layers {
         out.push_str("@layer ");
-        for (index, name) in layers.iter().enumerate() {
-            if index > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(name);
-        }
+        out.push_str(name);
         out.push_str(";\n");
+    }
+    for name in &layers {
+        out.push_str("@layer ");
+        out.push_str(name);
+        out.push_str(" {}\n");
     }
     for rule in &sheet.rules {
         if rule
