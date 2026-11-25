@@ -741,6 +741,7 @@ pub fn load_str_with_imports(
         provisional
     };
     let vars = settle_vars(&sheet, &collected, dark, options);
+    warn_about_variables(&sheet, &vars, &mut warnings);
     let semantic = crate::semantic::compute(&sheet, &vars, dark);
     let (palette, mut native, page_layout, page_gap) = match semantic {
         Some(computed) => (
@@ -759,7 +760,7 @@ pub fn load_str_with_imports(
         ),
     };
     region_opacities(&mut native, &vars);
-    let animations = animations(&sheet, &collected, dark, &vars);
+    let animations = animations(&sheet, &collected, dark, &vars, &mut warnings);
     let direct_background = direct_background(&sheet, &vars, directory, dark);
     let paint = options
         .paint
@@ -819,6 +820,48 @@ pub fn load_str_with_imports(
         diagnostics,
         remote,
     })
+}
+
+/// A `var()` the theme never defines, and one that only names itself back,
+/// are why a declaration goes missing; say so once each.
+fn warn_about_variables(sheet: &Stylesheet, vars: &css::Vars, warnings: &mut Vec<String>) {
+    let mut declared = std::collections::BTreeSet::new();
+    for rule in &sheet.rules {
+        for declaration in &rule.declarations {
+            if declaration.name.starts_with("--") {
+                declared.insert(declaration.name.clone());
+            }
+        }
+    }
+    for rule in &sheet.rules {
+        for declaration in &rule.declarations {
+            let mut rest = declaration.value.as_str();
+            while let Some(start) = css::find_ignore_case(rest, "var(") {
+                let after = &rest[start + 4..];
+                let Some(end) = css::matching_paren(after) else {
+                    break;
+                };
+                let name = after[..end].split(',').next().unwrap_or("").trim();
+                if name.starts_with("--") {
+                    if !declared.contains(name) {
+                        let note = format!("the variable {name} is used but never defined");
+                        if !warnings.contains(&note) {
+                            warnings.push(note);
+                        }
+                    } else if vars.contains(name) && vars.resolve(&format!("var({name})")).is_none()
+                    {
+                        let note = format!(
+                            "the variable {name} names itself back, or grows past the reader's budget"
+                        );
+                        if !warnings.contains(&note) {
+                            warnings.push(note);
+                        }
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+        }
+    }
 }
 
 /// What the engine drops or skips when it reads the theme's own text, with
@@ -1232,9 +1275,73 @@ fn over<V: Variables + ?Sized>(
         .map(|color| color.over(ground))
 }
 
+/// The `font-size` the theme's page rules settle the root at, when it is a
+/// simple `px` or `rem` length. `style-engine` resolves `rem` against 16 px,
+/// so the reader rewrites the theme's `rem` lengths against this size. A `rem`
+/// on the root itself is relative to the initial 16 px, as CSS defines it.
+pub(crate) fn root_font_size(sheet: &Stylesheet, dark: bool) -> f32 {
+    let mut root = 16.0;
+    let mut winner: Option<(bool, u32, usize)> = None;
+    let mut order = 0usize;
+    for rule in &sheet.rules {
+        if rule
+            .color_scheme
+            .is_some_and(|color_scheme| color_scheme != dark)
+        {
+            continue;
+        }
+        for selector in &rule.selectors {
+            let Some((selector_dark, specificity)) =
+                css::root_selector_with_specificity(selector, dark)
+            else {
+                continue;
+            };
+            if selector_dark != dark {
+                continue;
+            }
+            // The same layer weight `Collected` uses for the root's custom
+            // properties: layers outrank specificity, unlayered rules all.
+            let layer = rule.layer.map_or(1_000_000_000, |rank| {
+                rank.saturating_add(1).saturating_mul(1_000_000)
+            });
+            let weight = layer.saturating_add(specificity.min(999_999));
+            for declaration in &rule.declarations {
+                order += 1;
+                if !declaration.name.eq_ignore_ascii_case("font-size") {
+                    continue;
+                }
+                let Some(size) = simple_font_size(&declaration.value) else {
+                    continue;
+                };
+                let rank = (declaration.important, weight, order);
+                if winner.is_none_or(|old| rank >= old) {
+                    winner = Some(rank);
+                    root = size;
+                }
+            }
+        }
+    }
+    root
+}
+
+/// A root `font-size` written as a plain `px` or `rem` number.
+fn simple_font_size(value: &str) -> Option<f32> {
+    let lower = value.trim().to_ascii_lowercase();
+    let (number, factor) = if let Some(number) = lower.strip_suffix("px") {
+        (number, 1.0)
+    } else {
+        let number = lower.strip_suffix("rem")?;
+        // The root's own `rem` is relative to the initial 16 px, not to the
+        // size being declared here.
+        (number, 16.0)
+    };
+    let size = number.trim().parse::<f32>().ok()? * factor;
+    (size.is_finite() && size > 0.0).then_some(size)
+}
+
 /// A length in a custom property: `px`, `rem` or `em`, or a `calc()`,
-/// `min()`, `max()` or `clamp()` over them. Both relative units are 16 px,
-/// the size the window starts a page at.
+/// `min()`, `max()`, `clamp()`, `round()` or `abs()` over them. Both relative
+/// units are 16 px, the size the window starts a page at.
 fn length(vars: &css::Vars, names: &[&str]) -> Option<f32> {
     for name in names {
         let Some(raw) = vars.get(name) else {
@@ -1258,25 +1365,67 @@ fn length(vars: &css::Vars, names: &[&str]) -> Option<f32> {
 /// so a hostile file cannot exhaust the stack.
 const MAX_LENGTH_NESTING: usize = 32;
 
+/// The dimension a [`LengthParser`] reads, so one evaluator serves lengths,
+/// times and plain numbers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dimension {
+    Length,
+    Time,
+    Number,
+}
+
 /// Evaluates a length expression: a `px`, `rem` or `em` number, or `calc()`,
-/// `min()`, `max()` and `clamp()` over them with `+`, `-`, `*`, `/` and
-/// nested parentheses. A percentage or an unknown unit has no context here
-/// and gives `None`.
-fn eval_length(value: &str) -> Option<f32> {
+/// `min()`, `max()`, `clamp()`, `round()` or `abs()` over them with `+`, `-`,
+/// `*`, `/` and nested parentheses. A percentage or an unknown unit has no
+/// context here and gives `None`.
+pub(crate) fn eval_length(value: &str) -> Option<f32> {
+    eval_dimension(value, Dimension::Length).map(|(length, _)| length)
+}
+
+/// Evaluates a plain number: `0.5`, `calc(1 / 2)` or `min(1, 2)`. A unit
+/// makes the value something other than a number and gives `None`.
+pub(crate) fn eval_number(value: &str) -> Option<f32> {
+    eval_dimension(value, Dimension::Number).map(|(number, _)| number)
+}
+
+/// Evaluates a duration in milliseconds: `150ms`, `0.15s`, or
+/// `calc(100ms + 50ms)`. A unitless number or a negative duration is not a
+/// time CSS accepts.
+pub(crate) fn eval_time_ms(value: &str) -> Option<f32> {
+    let (milliseconds, has_unit) = eval_dimension(value, Dimension::Time)?;
+    (has_unit && milliseconds >= 0.0).then_some(milliseconds)
+}
+
+fn eval_dimension(value: &str, dimension: Dimension) -> Option<(f32, bool)> {
     let mut parser = LengthParser {
         text: value,
         index: 0,
+        dimension,
+        saw_unit: false,
     };
-    let length = parser.sum(0)?;
+    let number = parser.sum(0)?;
     parser.skip_space();
-    (parser.index == value.len() && length.is_finite()).then_some(length)
+    (parser.index == value.len() && number.is_finite()).then_some((number, parser.saw_unit))
 }
 
 /// The parser behind [`eval_length`]: CSS's sums and products of lengths,
-/// with nested parentheses and the four maths functions.
+/// times or numbers, with nested parentheses and the maths functions.
 struct LengthParser<'a> {
     text: &'a str,
     index: usize,
+    dimension: Dimension,
+    /// Whether a `ms` or `s` unit was read, so a plain number is still not a
+    /// duration.
+    saw_unit: bool,
+}
+
+/// How `round()` settles the quotient.
+#[derive(Clone, Copy)]
+enum Rounding {
+    Nearest,
+    Up,
+    Down,
+    ToZero,
 }
 
 impl LengthParser<'_> {
@@ -1288,6 +1437,13 @@ impl LengthParser<'_> {
         while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
             self.index += 1;
         }
+    }
+
+    /// Skips whitespace and says whether there was any.
+    fn spaced(&mut self) -> bool {
+        let start = self.index;
+        self.skip_space();
+        self.index > start
     }
 
     fn eat(&mut self, byte: u8) -> bool {
@@ -1302,14 +1458,28 @@ impl LengthParser<'_> {
     fn sum(&mut self, depth: usize) -> Option<f32> {
         let mut value = self.product(depth)?;
         loop {
-            self.skip_space();
+            // CSS requires whitespace on both sides of `+` and `-`; without
+            // it the expression is invalid, not a sum.
+            let before = self.spaced();
             match self.peek() {
                 Some(b'+') => {
+                    if !before {
+                        return None;
+                    }
                     self.index += 1;
+                    if !self.spaced() {
+                        return None;
+                    }
                     value += self.product(depth)?;
                 }
                 Some(b'-') => {
+                    if !before {
+                        return None;
+                    }
                     self.index += 1;
+                    if !self.spaced() {
+                        return None;
+                    }
                     value -= self.product(depth)?;
                 }
                 _ => break,
@@ -1321,6 +1491,9 @@ impl LengthParser<'_> {
     fn product(&mut self, depth: usize) -> Option<f32> {
         let mut value = self.term(depth)?;
         loop {
+            // Leave the whitespace in place when no operator follows, so
+            // `sum` can see that `+` and `-` are surrounded by it.
+            let before = self.index;
             self.skip_space();
             match self.peek() {
                 Some(b'*') => {
@@ -1335,7 +1508,10 @@ impl LengthParser<'_> {
                     }
                     value /= divisor;
                 }
-                _ => break,
+                _ => {
+                    self.index = before;
+                    break;
+                }
             }
         }
         value.is_finite().then_some(value)
@@ -1394,6 +1570,8 @@ impl LengthParser<'_> {
             }
             "min" | "max" => self.min_max(depth + 1, name == "min")?,
             "clamp" => self.clamp(depth + 1)?,
+            "round" => self.round(depth + 1)?,
+            "abs" => self.absolute_value(depth + 1)?,
             _ => return None,
         };
         value.is_finite().then_some(value)
@@ -1435,6 +1613,73 @@ impl LengthParser<'_> {
         Some(value.min(maximum).max(minimum))
     }
 
+    /// `round(<strategy>?, value, step?)`, with the step defaulting to 1.
+    fn round(&mut self, depth: usize) -> Option<f32> {
+        let strategy = self.rounding_strategy();
+        let value = self.sum(depth)?;
+        self.skip_space();
+        let step = if self.eat(b',') {
+            self.sum(depth)?
+        } else {
+            1.0
+        };
+        self.skip_space();
+        if !self.eat(b')') || !step.is_finite() || step <= 0.0 {
+            return None;
+        }
+        let quotient = value / step;
+        let rounded = match strategy {
+            Rounding::Nearest => (quotient + 0.5).floor(),
+            Rounding::Up => quotient.ceil(),
+            Rounding::Down => quotient.floor(),
+            Rounding::ToZero => quotient.trunc(),
+        };
+        let result = rounded * step;
+        result.is_finite().then_some(result)
+    }
+
+    /// The optional keyword before `round()`'s first argument. An unknown
+    /// word is put back for `sum` to read as a nested function.
+    fn rounding_strategy(&mut self) -> Rounding {
+        self.skip_space();
+        let start = self.index;
+        while self
+            .peek()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+        {
+            self.index += 1;
+        }
+        if self.index == start {
+            return Rounding::Nearest;
+        }
+        let word = &self.text.as_bytes()[start..self.index];
+        let strategy = if word.eq_ignore_ascii_case(b"nearest") {
+            Some(Rounding::Nearest)
+        } else if word.eq_ignore_ascii_case(b"up") {
+            Some(Rounding::Up)
+        } else if word.eq_ignore_ascii_case(b"down") {
+            Some(Rounding::Down)
+        } else if word.eq_ignore_ascii_case(b"to-zero") {
+            Some(Rounding::ToZero)
+        } else {
+            None
+        };
+        self.skip_space();
+        match strategy {
+            Some(strategy) if self.eat(b',') => strategy,
+            _ => {
+                self.index = start;
+                Rounding::Nearest
+            }
+        }
+    }
+
+    fn absolute_value(&mut self, depth: usize) -> Option<f32> {
+        let value = self.sum(depth)?;
+        self.skip_space();
+        self.eat(b')').then_some(value.abs())
+    }
+
     fn number(&mut self) -> Option<f32> {
         let start = self.index;
         let mut digits = 0usize;
@@ -1472,10 +1717,34 @@ impl LengthParser<'_> {
             self.index += 1;
         }
         let unit = self.text.get(unit_start..self.index)?;
-        let factor = match unit.to_ascii_lowercase().as_str() {
-            "" | "px" => 1.0,
-            "rem" | "em" => 16.0,
-            _ => return None,
+        let factor = match self.dimension {
+            Dimension::Length => match unit.to_ascii_lowercase().as_str() {
+                "" | "px" => 1.0,
+                "rem" | "em" => 16.0,
+                _ => return None,
+            },
+            Dimension::Time => match unit.to_ascii_lowercase().as_str() {
+                // A unitless factor lets a duration be scaled by a number,
+                // `calc(0.15s * 2)`; `eval_time_ms` still refuses a value
+                // that never names a time unit.
+                "" => 1.0,
+                "ms" => {
+                    self.saw_unit = true;
+                    1.0
+                }
+                "s" => {
+                    self.saw_unit = true;
+                    1000.0
+                }
+                _ => return None,
+            },
+            Dimension::Number => {
+                if unit.is_empty() {
+                    1.0
+                } else {
+                    return None;
+                }
+            }
         };
         let length = number * factor;
         length.is_finite().then_some(length)
@@ -2606,11 +2875,53 @@ fn look(
 /// Reads the animations that write the window's root or body. A theme's
 /// animated pseudo-elements and DOM nodes still have no native target, but a
 /// moving ground, glow or pulse is something the window can paint.
+/// Whether an `animation` shorthand's word could name frames, rather than a
+/// duration, an easing, a count or a keyword.
+fn looks_like_animation_name(token: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "none",
+        "infinite",
+        "normal",
+        "reverse",
+        "alternate",
+        "alternate-reverse",
+        "forwards",
+        "backwards",
+        "both",
+        "running",
+        "paused",
+        "ease",
+        "ease-in",
+        "ease-out",
+        "ease-in-out",
+        "linear",
+        "step-start",
+        "step-end",
+        "initial",
+        "inherit",
+        "unset",
+    ];
+    let token = token.trim();
+    !token.is_empty()
+        && !KEYWORDS.contains(&token.to_ascii_lowercase().as_str())
+        && !token.contains('(')
+        && !token
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+        && !token.ends_with("ms")
+        && !token.ends_with('s')
+        && token
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
 fn animations(
     sheet: &Stylesheet,
     _collected: &Collected,
     dark: bool,
     vars: &css::Vars,
+    warnings: &mut Vec<String>,
 ) -> Vec<Animation> {
     /// An animation's name as a theme writes it, without the quotes CSS allows
     /// around an identifier: `@keyframes "wash"` and `animation: wash` name the
@@ -2678,6 +2989,17 @@ fn animations(
                     if lower.trim() == "none" {
                         continue;
                     }
+                    for token in value.split_whitespace().map(animation_name) {
+                        if looks_like_animation_name(&token)
+                            && !sheet.keyframes.contains_key(&token)
+                        {
+                            let note =
+                                format!("the animation '{token}' has no @keyframes; left still");
+                            if !warnings.contains(&note) {
+                                warnings.push(note);
+                            }
+                        }
+                    }
                     shorthand.extend(
                         value
                             .split_whitespace()
@@ -2686,6 +3008,15 @@ fn animations(
                     );
                 }
                 _ => {}
+            }
+        }
+        for name in names
+            .iter()
+            .filter(|name| !sheet.keyframes.contains_key(*name))
+        {
+            let note = format!("the animation '{name}' has no @keyframes; left still");
+            if !warnings.contains(&note) {
+                warnings.push(note);
             }
         }
         names.retain(|name| sheet.keyframes.contains_key(name));
@@ -3484,6 +3815,60 @@ html.theme-light:not([data-rl-mode="dark"]) {
     }
 
     #[test]
+    fn a_variable_nothing_defines_is_named() {
+        let theme = load_str(
+            r#"[class*="sidebar_"] { background: var(--missing); }"#,
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .expect("theme");
+        assert!(
+            theme
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("--missing") && warning.contains("never defined")),
+            "{:?}",
+            theme.warnings
+        );
+    }
+
+    #[test]
+    fn a_variable_that_names_itself_back_is_named() {
+        let theme = load_str(
+            r#":root { --a: var(--b); --b: var(--a); --background-primary: var(--a); }"#,
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .expect("theme");
+        assert!(
+            theme
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("names itself back")),
+            "{:?}",
+            theme.warnings
+        );
+    }
+
+    #[test]
+    fn an_animation_without_keyframes_is_named() {
+        let theme = load_str(
+            "body { animation: nope 2s infinite; }",
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .expect("theme");
+        assert!(
+            theme
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nope") && warning.contains("@keyframes")),
+            "{:?}",
+            theme.warnings
+        );
+    }
+
+    #[test]
     fn a_layer_statement_fixes_the_order_of_later_blocks() {
         // The statement names `a` before `b`, so `b` wins, even though the
         // block for `b` is written first. A browser and the engine both hold
@@ -4196,6 +4581,68 @@ html.theme-light:not([data-rl-mode="dark"]) {
             let theme = load_str(&css, None, &Options::with_mode(Mode::Dark)).expect("theme");
             assert_eq!(theme.look.radius, None, "{value}");
         }
+    }
+
+    #[test]
+    fn a_sum_needs_whitespace_around_its_operator() {
+        assert_eq!(eval_length("calc(10px + 2px)"), Some(12.0));
+        assert_eq!(eval_length("calc(10px+2px)"), None);
+        assert_eq!(eval_length("calc(10px -2px)"), None);
+    }
+
+    #[test]
+    fn a_length_expression_rounds_and_takes_an_absolute_value() {
+        assert_eq!(eval_length("round(12.4px, 1px)"), Some(12.0));
+        assert_eq!(eval_length("round(12.6px, 1px)"), Some(13.0));
+        assert_eq!(eval_length("round(up, 12.4px, 5px)"), Some(15.0));
+        assert_eq!(eval_length("round(down, 12.4px, 5px)"), Some(10.0));
+        assert_eq!(eval_length("round(to-zero, -12.4px, 5px)"), Some(-10.0));
+        assert_eq!(eval_length("abs(-12px)"), Some(12.0));
+        assert_eq!(eval_length("calc(round(12.4px, 1px) + 1px)"), Some(13.0));
+    }
+
+    #[test]
+    fn a_number_expression_has_no_unit() {
+        assert_eq!(eval_number("0.5"), Some(0.5));
+        assert_eq!(eval_number("calc(1 / 2)"), Some(0.5));
+        assert_eq!(eval_number("min(1, 2)"), Some(1.0));
+        assert_eq!(eval_number("50%"), None);
+        assert_eq!(eval_number("12px"), None);
+    }
+
+    #[test]
+    fn a_time_expression_settles_in_milliseconds() {
+        assert_eq!(eval_time_ms("150ms"), Some(150.0));
+        assert_eq!(eval_time_ms("0.15s"), Some(150.0));
+        assert_eq!(eval_time_ms("calc(100ms + 50ms)"), Some(150.0));
+        assert_eq!(eval_time_ms("calc(0.1s * 2)"), Some(200.0));
+        assert_eq!(eval_time_ms("150"), None, "a duration needs its unit");
+        assert_eq!(eval_time_ms("-1s"), None, "CSS refuses a negative one");
+    }
+
+    #[test]
+    fn the_page_font_size_is_the_roots_rem_step() {
+        let sheet = crate::css::parse("html { font-size: 10px; }", |_, _| None);
+        assert_eq!(root_font_size(&sheet, true), 10.0);
+        assert_eq!(root_font_size(&sheet, false), 10.0);
+
+        let sheet = crate::css::parse(":root { font-size: 0.625rem; }", |_, _| None);
+        assert_eq!(root_font_size(&sheet, true), 10.0, "rem against 16px");
+
+        let sheet = crate::css::parse("body { font-size: 18px; }", |_, _| None);
+        assert_eq!(root_font_size(&sheet, true), 18.0);
+
+        // A theme class is more specific than the bare tag, wherever it sits.
+        let sheet = crate::css::parse(
+            ".theme-dark { font-size: 12px; } html { font-size: 10px; }",
+            |_, _| None,
+        );
+        assert_eq!(root_font_size(&sheet, true), 12.0);
+        assert_eq!(root_font_size(&sheet, false), 10.0);
+
+        // A relative size does not say what the root's step is.
+        let sheet = crate::css::parse("html { font-size: 1.5em; }", |_, _| None);
+        assert_eq!(root_font_size(&sheet, true), 16.0);
     }
 
     #[test]
