@@ -1123,6 +1123,9 @@ fn number(token: &str) -> Option<f32> {
     if token.is_empty() {
         return None;
     }
+    // `pt`, `in`, `vmin` and the other units the engine does not know arrive
+    // as their pixel value, then settle through the same suffix parser.
+    let token = crate::css::normalize_units(token);
     let lower = token.to_ascii_lowercase();
     let parsed = |suffix: &str| {
         lower
@@ -2666,6 +2669,29 @@ mod tests {
         );
         assert_eq!(theme.native.motion_ms, Some(300));
         assert_eq!(theme.native.motion_steps, Some(6));
+    }
+
+    #[test]
+    fn absolute_and_viewport_units_reach_a_region() {
+        let theme = dark(r#"[class*="category_"] { font-size: 9pt; }"#);
+        assert_eq!(theme.native.category_size, Some(12.0));
+
+        let theme = dark(r#"[class*="category_"] { font-size: 1vmin; }"#);
+        assert_eq!(theme.native.category_size, Some(7.2));
+
+        // The root variable is filled in before the engine reads the size.
+        let theme = dark(
+            r#":root { --size: 1vmin; }
+               [class*="category_"] { font-size: var(--size); }"#,
+        );
+        assert_eq!(theme.native.category_size, Some(7.2));
+    }
+
+    #[test]
+    fn a_duration_in_seconds_keeps_its_unit() {
+        // `s` is not a length: a transition stays a transition.
+        let theme = dark(r#"[class*="menu_"] { transition-duration: 0.1s; }"#);
+        assert_eq!(theme.native.motion_ms, Some(100));
     }
 
     #[test]

@@ -243,11 +243,17 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
             let region_local = regions
                 .iter()
                 .any(|name| mentions_var(&declaration.value, name));
+            // The engine does not know `pt`, `in` or the viewport units beyond
+            // `vw` and `vh`; every declaration carries its length in pixels.
+            let normalized = css::normalize_units(&declaration.value);
             let value = if region_local {
-                color_functions(&declaration.value, !dark)
+                color_functions(&normalized, !dark)
             } else {
-                colors(&declaration.value, vars, !dark)
+                colors(&normalized, vars, !dark)
             };
+            // `colors` fills a `var()` in from the settled root values, which
+            // may carry a unit of their own; the engine reads the result too.
+            let value = css::normalize_units(&value);
             if value.len() > 4096 || value.contains("data:") {
                 continue;
             }
@@ -622,6 +628,9 @@ fn inline_vars(
             continue;
         }
         let value = colors(value, vars, !dark);
+        // These are the engine's root custom properties, so a length in one
+        // must already be pixels: the engine does not know `pt` or `vmin`.
+        let value = crate::css::normalize_units(&value);
         if value.len() > 4096 || value.contains("data:") {
             continue;
         }
@@ -1644,4 +1653,39 @@ fn engine_gradient(
         })
         .collect::<Vec<_>>();
     (stops.len() >= 2).then_some(Gradient { kind, stops })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_css_writes_lengths_in_pixels() {
+        let sheet = crate::css::parse(
+            r#"[class*="category_"] { font-size: 9pt; border-radius: 1vmin; }"#,
+            |_, _| None,
+        );
+        let css = to_css(&sheet, &crate::css::Vars::default(), true, &BTreeSet::new());
+        assert!(css.contains("font-size:12px;"), "{css}");
+        assert!(css.contains("border-radius:7.2px;"), "{css}");
+    }
+
+    #[test]
+    fn to_css_fills_in_a_root_length_in_pixels() {
+        let sheet = crate::css::parse(
+            r#":root { --size: 9pt; }
+               [class*="category_"] { font-size: var(--size); }"#,
+            |_, _| None,
+        );
+        let mut vars = crate::css::Vars::default();
+        vars.insert(&css::Declaration {
+            name: "--size".into(),
+            value: "9pt".into(),
+            important: false,
+        });
+        let used = BTreeSet::from(["--size".to_owned()]);
+        let css = to_css(&sheet, &vars, true, &used);
+        assert!(css.contains("font-size:12px;"), "{css}");
+        assert!(css.contains("--size:12px;"), "{css}");
+    }
 }

@@ -1225,7 +1225,9 @@ fn over<V: Variables + ?Sized>(
         .map(|color| color.over(ground))
 }
 
-/// A px, rem or em length in a custom property.
+/// A length in a custom property: `px`, `rem` or `em`, or a `calc()`,
+/// `min()`, `max()` or `clamp()` over them. Both relative units are 16 px,
+/// the size the window starts a page at.
 fn length(vars: &css::Vars, names: &[&str]) -> Option<f32> {
     for name in names {
         let Some(raw) = vars.get(name) else {
@@ -1235,20 +1237,242 @@ fn length(vars: &css::Vars, names: &[&str]) -> Option<f32> {
             continue;
         };
         let value = value.trim().to_ascii_lowercase();
-        let value = if let Some(number) = value.strip_suffix("rem") {
-            number.trim().parse::<f32>().ok().map(|value| value * 16.0)
-        } else if let Some(number) = value.strip_suffix("em") {
-            number.trim().parse::<f32>().ok().map(|value| value * 16.0)
-        } else if let Some(number) = value.strip_suffix("px") {
-            number.trim().parse::<f32>().ok()
-        } else {
-            value.parse::<f32>().ok()
-        };
-        if let Some(value) = value {
+        // Absolute and viewport units become pixels before the expression is
+        // read, so `calc(9pt + 1vmin)` settles here as well as in the engine.
+        let value = crate::css::normalize_units(&value);
+        if let Some(value) = eval_length(&value) {
             return Some(value);
         }
     }
     None
+}
+
+/// How deeply `calc()` and parentheses may nest before the value is refused,
+/// so a hostile file cannot exhaust the stack.
+const MAX_LENGTH_NESTING: usize = 32;
+
+/// Evaluates a length expression: a `px`, `rem` or `em` number, or `calc()`,
+/// `min()`, `max()` and `clamp()` over them with `+`, `-`, `*`, `/` and
+/// nested parentheses. A percentage or an unknown unit has no context here
+/// and gives `None`.
+fn eval_length(value: &str) -> Option<f32> {
+    let mut parser = LengthParser {
+        text: value,
+        index: 0,
+    };
+    let length = parser.sum(0)?;
+    parser.skip_space();
+    (parser.index == value.len() && length.is_finite()).then_some(length)
+}
+
+/// The parser behind [`eval_length`]: CSS's sums and products of lengths,
+/// with nested parentheses and the four maths functions.
+struct LengthParser<'a> {
+    text: &'a str,
+    index: usize,
+}
+
+impl LengthParser<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.index).copied()
+    }
+
+    fn skip_space(&mut self) {
+        while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
+            self.index += 1;
+        }
+    }
+
+    fn eat(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn sum(&mut self, depth: usize) -> Option<f32> {
+        let mut value = self.product(depth)?;
+        loop {
+            self.skip_space();
+            match self.peek() {
+                Some(b'+') => {
+                    self.index += 1;
+                    value += self.product(depth)?;
+                }
+                Some(b'-') => {
+                    self.index += 1;
+                    value -= self.product(depth)?;
+                }
+                _ => break,
+            }
+        }
+        value.is_finite().then_some(value)
+    }
+
+    fn product(&mut self, depth: usize) -> Option<f32> {
+        let mut value = self.term(depth)?;
+        loop {
+            self.skip_space();
+            match self.peek() {
+                Some(b'*') => {
+                    self.index += 1;
+                    value *= self.term(depth)?;
+                }
+                Some(b'/') => {
+                    self.index += 1;
+                    let divisor = self.term(depth)?;
+                    if divisor == 0.0 {
+                        return None;
+                    }
+                    value /= divisor;
+                }
+                _ => break,
+            }
+        }
+        value.is_finite().then_some(value)
+    }
+
+    fn term(&mut self, depth: usize) -> Option<f32> {
+        self.skip_space();
+        let sign = match self.peek() {
+            Some(b'+') => {
+                self.index += 1;
+                1.0
+            }
+            Some(b'-') => {
+                self.index += 1;
+                -1.0
+            }
+            _ => 1.0,
+        };
+        let value = sign * self.atom(depth)?;
+        value.is_finite().then_some(value)
+    }
+
+    fn atom(&mut self, depth: usize) -> Option<f32> {
+        if depth > MAX_LENGTH_NESTING {
+            return None;
+        }
+        if self.eat(b'(') {
+            let value = self.sum(depth + 1)?;
+            self.skip_space();
+            return self.eat(b')').then_some(value);
+        }
+        if self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            return self.function(depth);
+        }
+        self.number()
+    }
+
+    fn function(&mut self, depth: usize) -> Option<f32> {
+        let start = self.index;
+        while self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            self.index += 1;
+        }
+        let name = self.text.get(start..self.index)?.to_ascii_lowercase();
+        self.skip_space();
+        if !self.eat(b'(') {
+            return None;
+        }
+        let value = match name.as_str() {
+            "calc" => {
+                let value = self.sum(depth + 1)?;
+                self.skip_space();
+                if !self.eat(b')') {
+                    return None;
+                }
+                value
+            }
+            "min" | "max" => self.min_max(depth + 1, name == "min")?,
+            "clamp" => self.clamp(depth + 1)?,
+            _ => return None,
+        };
+        value.is_finite().then_some(value)
+    }
+
+    fn min_max(&mut self, depth: usize, minimum: bool) -> Option<f32> {
+        let mut value = self.sum(depth)?;
+        loop {
+            self.skip_space();
+            if self.eat(b',') {
+                let next = self.sum(depth)?;
+                value = if minimum {
+                    value.min(next)
+                } else {
+                    value.max(next)
+                };
+                continue;
+            }
+            return self.eat(b')').then_some(value);
+        }
+    }
+
+    fn clamp(&mut self, depth: usize) -> Option<f32> {
+        let minimum = self.sum(depth)?;
+        self.skip_space();
+        if !self.eat(b',') {
+            return None;
+        }
+        let value = self.sum(depth)?;
+        self.skip_space();
+        if !self.eat(b',') {
+            return None;
+        }
+        let maximum = self.sum(depth)?;
+        self.skip_space();
+        if !self.eat(b')') {
+            return None;
+        }
+        Some(value.min(maximum).max(minimum))
+    }
+
+    fn number(&mut self) -> Option<f32> {
+        let start = self.index;
+        let mut digits = 0usize;
+        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+            self.index += 1;
+            digits += 1;
+        }
+        if self.peek() == Some(b'.') {
+            self.index += 1;
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.index += 1;
+                digits += 1;
+            }
+        }
+        if digits == 0 {
+            return None;
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            let exponent = self.index;
+            self.index += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.index += 1;
+            }
+            let exponent_start = self.index;
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.index += 1;
+            }
+            if self.index == exponent_start {
+                self.index = exponent;
+            }
+        }
+        let number = self.text.get(start..self.index)?.parse::<f32>().ok()?;
+        let unit_start = self.index;
+        while self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            self.index += 1;
+        }
+        let unit = self.text.get(unit_start..self.index)?;
+        let factor = match unit.to_ascii_lowercase().as_str() {
+            "" | "px" => 1.0,
+            "rem" | "em" => 16.0,
+            _ => return None,
+        };
+        let length = number * factor;
+        length.is_finite().then_some(length)
+    }
 }
 
 /// A percentage custom property as 0..1 (`25`, `25%` or `0.25`).
@@ -3892,6 +4116,57 @@ html.theme-light:not([data-rl-mode="dark"]) {
         )
         .unwrap();
         assert_eq!(theme.look.panel_gap, Some(9.0));
+    }
+
+    #[test]
+    fn length_functions_in_a_custom_property_settle_to_pixels() {
+        for (value, expected) in [
+            ("calc(8px + 4px)", 12.0),
+            ("min(12px, 20px)", 12.0),
+            ("max(4px, 12px)", 12.0),
+            ("clamp(4px, 12px, 20px)", 12.0),
+            ("calc(6px * 2)", 12.0),
+            ("calc(1rem + 4px)", 20.0),
+        ] {
+            let css = format!(":root {{ --radius-md: {value}; }}");
+            let theme = load_str(&css, None, &Options::with_mode(Mode::Dark)).expect("theme");
+            assert_eq!(theme.look.radius, Some(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_length_expression_nests_and_divides() {
+        let nested = load_str(
+            ":root { --radius-md: calc((4px + 2px) * 2); }",
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .unwrap();
+        assert_eq!(nested.look.radius, Some(12.0));
+
+        let divided = load_str(
+            ":root { --radius-md: calc(24px / 2); }",
+            None,
+            &Options::with_mode(Mode::Dark),
+        )
+        .unwrap();
+        assert_eq!(divided.look.radius, Some(12.0));
+    }
+
+    #[test]
+    fn an_invalid_length_expression_is_no_length() {
+        for value in [
+            "calc()",
+            "calc(1px / 0)",
+            "calc(1px +)",
+            "min(1px,)",
+            "clamp(1px, 2px)",
+            "50%",
+        ] {
+            let css = format!(":root {{ --radius-md: {value}; }}");
+            let theme = load_str(&css, None, &Options::with_mode(Mode::Dark)).expect("theme");
+            assert_eq!(theme.look.radius, None, "{value}");
+        }
     }
 
     #[test]

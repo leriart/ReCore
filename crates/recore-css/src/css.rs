@@ -773,6 +773,230 @@ fn nested_css(parents: &[String], prelude: &str, body: &str) -> String {
     out
 }
 
+/// Rewrites every length with an absolute or viewport unit as its value in
+/// CSS pixels at the reference viewport.
+///
+/// `style-engine` 1.0.0 does not know `pt`, `pc`, `in`, `cm`, `mm`, `Q` or
+/// the viewport units beyond `vw` and `vh`, and the reader's own length
+/// parsers only take `px`, `rem`, `em` and unitless numbers. A number inside
+/// a quoted string, a comment or a `url(...)` is left alone, as is an `em`,
+/// `rem`, `%` or a unit this reader does not rewrite. The value keeps at most
+/// four decimals, so `9pt` becomes `12px` and `1pt` becomes `1.3333px`.
+pub(crate) fn normalize_units(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut out: Option<String> = None;
+    let mut written = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => index = skip_string(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => index = skip_comment(bytes, index),
+            b'u' | b'U' if starts_url(bytes, index) => index = skip_url(bytes, index),
+            _ => match unit_token(text, index) {
+                Some((end, pixels)) => {
+                    let output = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                    output.push_str(&text[written..index]);
+                    output.push_str(&format_px(pixels));
+                    output.push_str("px");
+                    written = end;
+                    index = end;
+                }
+                None => index += 1,
+            },
+        }
+    }
+    match out {
+        Some(mut output) => {
+            output.push_str(&text[written..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(text),
+    }
+}
+
+/// Whether `byte` continues a CSS identifier, so a number right after it is
+/// part of the same name rather than a length of its own.
+fn identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || !byte.is_ascii()
+}
+
+/// The byte after the quoted string that starts at `start`.
+fn skip_string(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the comment that starts at `start`.
+fn skip_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// Whether `url(` starts at `start`, as its own token.
+fn starts_url(bytes: &[u8], start: usize) -> bool {
+    if start > 0 && identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+    bytes
+        .get(start..start + 4)
+        .is_some_and(|word| word.eq_ignore_ascii_case(b"url("))
+}
+
+/// The byte after the `url(...)` that starts at `start`.
+fn skip_url(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 3;
+    let mut depth = 0u32;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(_) if byte == b'\\' => index += 2,
+            Some(active) if byte == active => {
+                quote = None;
+                index += 1;
+            }
+            Some(_) => index += 1,
+            None => match byte {
+                b'"' | b'\'' => {
+                    quote = Some(byte);
+                    index += 1;
+                }
+                b'(' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    index += 1;
+                    if depth == 0 {
+                        return index;
+                    }
+                }
+                _ => index += 1,
+            },
+        }
+    }
+    bytes.len()
+}
+
+/// The end and pixel value of the length starting at `start`, when its unit
+/// is one this reader rewrites.
+fn unit_token(text: &str, start: usize) -> Option<(usize, f32)> {
+    let bytes = text.as_bytes();
+    if start > 0 && identifier_byte(bytes[start - 1]) {
+        return None;
+    }
+    let mut index = start;
+    let sign = match bytes.get(index) {
+        Some(b'+') => {
+            index += 1;
+            1.0
+        }
+        Some(b'-') => {
+            index += 1;
+            -1.0
+        }
+        _ => 1.0,
+    };
+    let number_start = index;
+    let mut digits = 0usize;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+        digits += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    // An exponent, as in `1e3pt`; a unit starting with `e` is not one.
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let mut cursor = index + 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        let exponent_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor > exponent_start {
+            index = cursor;
+        }
+    }
+    let number_end = index;
+    let unit_start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_alphabetic) {
+        index += 1;
+    }
+    if index == unit_start {
+        return None;
+    }
+    let unit = text.get(unit_start..index)?.to_ascii_lowercase();
+    let factor = unit_factor(&unit)?;
+    if factor == 1.0 {
+        // `px` already is the unit the engine reads.
+        return None;
+    }
+    let number = text.get(number_start..number_end)?.parse::<f32>().ok()?;
+    let pixels = sign * number * factor;
+    pixels.is_finite().then_some((index, pixels))
+}
+
+/// The pixel value of one unit at the reference viewport.
+fn unit_factor(unit: &str) -> Option<f32> {
+    let factor = match unit {
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        "vw" | "svw" | "lvw" | "dvw" => VIEWPORT.0 / 100.0,
+        "vh" | "svh" | "lvh" | "dvh" => VIEWPORT.1 / 100.0,
+        "vmin" | "svmin" | "lvmin" | "dvmin" => VIEWPORT.0.min(VIEWPORT.1) / 100.0,
+        "vmax" | "svmax" | "lvmax" | "dvmax" => VIEWPORT.0.max(VIEWPORT.1) / 100.0,
+        _ => return None,
+    };
+    Some(factor)
+}
+
+/// A pixel count with at most four decimals and no trailing zeros.
+fn format_px(value: f32) -> String {
+    let mut text = format!("{value:.4}");
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    if text == "-0" {
+        text.clear();
+        text.push('0');
+    }
+    text
+}
+
 /// The byte offset of `needle` in `text`, ignoring ASCII case, as CSS
 /// keywords are case-insensitive.
 pub(crate) fn find_ignore_case(text: &str, needle: &str) -> Option<usize> {
@@ -3124,5 +3348,47 @@ mod tests {
         let text = strip_comments("a{content:\"/*x*/\";/*y*/color:red}");
         assert!(text.contains("\"/*x*/\""));
         assert!(!text.contains("/*y*/"));
+    }
+
+    #[test]
+    fn absolute_and_viewport_units_become_pixels() {
+        assert_eq!(normalize_units("9pt").as_ref(), "12px");
+        assert_eq!(normalize_units("1in").as_ref(), "96px");
+        assert_eq!(normalize_units("2Q").as_ref(), "1.8898px");
+        assert_eq!(normalize_units("1vmin").as_ref(), "7.2px");
+        assert_eq!(normalize_units("1dvh").as_ref(), "7.2px");
+        assert_eq!(
+            normalize_units("calc(1pt + 1px)").as_ref(),
+            "calc(1.3333px + 1px)"
+        );
+    }
+
+    #[test]
+    fn strings_and_urls_keep_their_numbers() {
+        let quoted = normalize_units("\"9pt\"");
+        assert!(matches!(quoted, Cow::Borrowed(_)));
+        assert_eq!(quoted.as_ref(), "\"9pt\"");
+        let url = normalize_units("url(9pt.png)");
+        assert!(matches!(url, Cow::Borrowed(_)));
+        assert_eq!(url.as_ref(), "url(9pt.png)");
+        assert_eq!(
+            normalize_units("url(\"9pt.png\") 9pt").as_ref(),
+            "url(\"9pt.png\") 12px"
+        );
+        assert_eq!(
+            normalize_units("1rem 0.5em 50% 9").as_ref(),
+            "1rem 0.5em 50% 9"
+        );
+    }
+
+    #[test]
+    fn normalize_units_borrows_text_without_a_rewritten_unit() {
+        let text = "color: #ff0000; margin: 4px 2rem";
+        assert!(matches!(normalize_units(text), Cow::Borrowed(_)));
+        // A duration and a percentage are not lengths.
+        assert_eq!(
+            normalize_units("transition-duration: 0.1s").as_ref(),
+            "transition-duration: 0.1s"
+        );
     }
 }
