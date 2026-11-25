@@ -531,11 +531,15 @@ pub fn view<'a>(ctx: crate::ctx::Ctx<'a>) -> Option<Element<'a, Message>> {
         page = page.push(container(top).padding(Padding::new(16.0).bottom(8)));
     }
     if let Some(note) = &ctx.forum_post.note {
-        page = page.push(
-            container(text(note).size(14).color(theme.muted).center())
-                .padding(24)
-                .center(Length::Fill),
-        );
+        // A note that says the list is coming is drawn with the ring that
+        // turns, so a slow answer and a stuck one look different.
+        let waiting = note.starts_with("Loading") || note.starts_with("Searching");
+        let mut line = row![].spacing(8).align_y(Alignment::Center);
+        if waiting {
+            line = line.push(crate::widgets::spinner(16.0, theme.muted));
+        }
+        line = line.push(text(note).size(14).color(theme.muted));
+        page = page.push(container(line).padding(24).center(Length::Fill));
     } else if ctx.forum_post.empty {
         let words = if ctx.forum_post.searched {
             "No results found"

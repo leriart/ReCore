@@ -192,6 +192,10 @@ and the app uses them with its one `Message`, so nothing is mapped:
 - `widgets::gauge` and `widgets::live_text`: a box painted from what it
   reads as it's drawn (a meter) and a line of text read so (a clock),
   each drawn again every so often while it shows, with no message.
+  `widgets::spinner` is a ring of dots that turns while something loads,
+  the kit's one picture of waiting, drawn on the same timer; a panel that
+  is fetching shows it rather than a still "Loading..." and so tells a
+  slow answer from a stuck one.
   `Rows::measured` lays rows out at their content's height and hands the
   heights that differ to the app with no message, apart from those below
   the view of someone reading earlier messages. `Corner` holds a bar at a

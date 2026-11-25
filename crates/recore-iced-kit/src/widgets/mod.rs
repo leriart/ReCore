@@ -99,11 +99,12 @@ mod rows;
 mod select;
 mod settle;
 mod smooth;
+mod spinner;
 mod zoom;
 
 pub use self::{
     autoscroll::*, colour::*, cosmetic::*, drag::*, fold::*, layers::*, live::*, picture::*,
-    pointer::*, rows::*, select::*, settle::*, smooth::*, zoom::*,
+    pointer::*, rows::*, select::*, settle::*, smooth::*, spinner::*, zoom::*,
 };
 
 // ---------------------------------------------------------------------------

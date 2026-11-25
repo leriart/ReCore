@@ -438,8 +438,15 @@ pub(super) fn edge_button<'a>(
             "Earlier messages".to_owned(),
         )
     };
+    // While it loads, the row shows the ring that turns rather than a
+    // still glyph: a slow answer and a stuck one look different that way.
+    let marker: Element<'a, Message> = if loading {
+        crate::widgets::spinner(16.0, ink).into()
+    } else {
+        ctx.look.glyph(icon, 16, ink).into()
+    };
     let face = row![
-        ctx.look.glyph(icon, 16, ink),
+        marker,
         text(words).size(14).font(MEDIUM()).color(theme.secondary)
     ]
     .spacing(6)
