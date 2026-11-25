@@ -24,9 +24,7 @@ use crate::{
     people::{NameInk, Person},
     pictures::{Face, Icon},
     profile,
-    style::{
-        CHIP, CROWN, HEADING, MEMBER_HOVER, MEMBER_OPEN, faded, fill, hex, rounded, scrollbar,
-    },
+    style::{CROWN, faded, fill, hex, rounded, scrollbar},
     sync::Scroll,
     theme::rgb,
     widgets::{Pic, PlateRow, RightPress, Rows},
@@ -612,7 +610,7 @@ impl<'a> View<'a> {
             text(theme.member_heading_transform.apply(heading))
                 .size(theme.member_heading_size)
                 .font(MEDIUM())
-                .color(hex(HEADING)),
+                .color(theme.muted),
         );
         container(line)
             .padding(Padding {
@@ -673,7 +671,7 @@ impl<'a> View<'a> {
                     height: 16.0,
                     pad: 4.0,
                     radius: 4.0,
-                    fill: CHIP,
+                    fill: theme.wash(0.10),
                     ink: theme.text,
                 },
                 opacity,
@@ -756,9 +754,9 @@ impl<'a> View<'a> {
                 .clip(true)
                 .style(move |_| container::Style {
                     background: if selected {
-                        Some(MEMBER_OPEN.into())
+                        Some(theme.active.into())
                     } else {
-                        pointed.then(|| MEMBER_HOVER.into())
+                        pointed.then(|| theme.hover.into())
                     },
                     border: crate::style::round(8),
                     ..Default::default()

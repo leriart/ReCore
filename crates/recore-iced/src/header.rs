@@ -20,6 +20,7 @@ use recore_core::{
 use crate::{
     app::{App, Message},
     controls::{self, lit_style},
+    elide::elide,
     fonts::{MEDIUM, SEMIBOLD},
     looks::Status,
     markdown::{self, Body},
@@ -265,29 +266,22 @@ pub fn view<'a>(ctx: crate::ctx::Ctx<'a>) -> Element<'a, Message> {
         head = head.push(ctx.look.glyph(icon, ROOM_ICON, theme.channel_read));
     }
     let fills = header.topic.is_none() && header.status.is_none() && header.activity.is_empty();
-    let name = container(
-        text(theme.header_transform.apply(header.name.as_str()))
-            .size(theme.header_size)
-            .font(SEMIBOLD())
-            .color(theme.channel_white)
-            .wrapping(text::Wrapping::None),
-    )
-    .clip(true);
-    head = head.push(if fills {
-        name.width(Length::Fill)
-    } else {
-        name
-    });
+    // A name too long for its room ends in "…" rather than being cut
+    // mid-glyph: the room a header has changes with the window, and a cut
+    // glyph reads as a mistake.
+    let name = elide(theme.header_transform.apply(header.name.as_str()))
+        .size(theme.header_size)
+        .font(SEMIBOLD())
+        .color(theme.channel_white);
+    // The name fills the line only when nothing follows it; otherwise it
+    // takes the room it needs so the topic, status or activity keeps its own.
+    head = head.push(if fills { name } else { name.shrink() });
     if let Some((_, topic)) = &header.topic {
         // A click shows it in full under the line, as Discord does;
         // its links open from there.
-        let line = iced::widget::mouse_area(
-            container(topic_line(ctx, topic))
-                .width(Length::Fill)
-                .clip(true),
-        )
-        .on_press(Message::Popover(crate::header_popovers::Event::Topic))
-        .interaction(iced::mouse::Interaction::Pointer);
+        let line = iced::widget::mouse_area(container(topic_line(ctx, topic)).width(Length::Fill))
+            .on_press(Message::Popover(crate::header_popovers::Event::Topic))
+            .interaction(iced::mouse::Interaction::Pointer);
         head = head.push(dot(theme)).push(ctx.spot(line));
     } else if let Some(status) = &header.status {
         head = head.push(dot(theme)).push(

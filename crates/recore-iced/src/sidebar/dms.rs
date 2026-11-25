@@ -62,7 +62,7 @@ impl<'a> super::View<'a> {
                     height: 16.0,
                     pad: 4.0,
                     radius: 4.0,
-                    fill: crate::style::CHIP,
+                    fill: theme.wash(0.10),
                     ink: theme.text,
                 },
                 opacity,

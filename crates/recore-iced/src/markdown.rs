@@ -303,12 +303,36 @@ pub fn parse(
     }
 }
 
-/// The inks of a code block's tokens: Discord's dark-theme syntax colours,
-/// which stay legible on ReCore's panels.
+/// The inks of a code block's tokens on a dark panel: Discord's own syntax
+/// colours. [`code_ink`] has the light ones.
 const CODE_KEYWORD: u32 = 0xc678dd;
 const CODE_STRING: u32 = 0x98c379;
 const CODE_COMMENT: u32 = 0x7f848e;
 const CODE_NUMBER: u32 = 0xd19a66;
+
+/// The same four tokens on a light panel. Discord's dark colours are chosen
+/// to read on its dark ground and a comment of `#7f848e` is about 3.3:1 on
+/// a near-white one, under the 4.5:1 the rest of the window keeps.
+const CODE_KEYWORD_LIGHT: u32 = 0x8250df;
+const CODE_STRING_LIGHT: u32 = 0x116329;
+const CODE_COMMENT_LIGHT: u32 = 0x6e7781;
+const CODE_NUMBER_LIGHT: u32 = 0x0550ae;
+
+/// A code token's ink on `theme`'s own ground: its dark colour as written,
+/// or the light twin of it on a light theme. A mention's or a notice's own
+/// colour is not a token and comes back unchanged.
+fn code_ink(theme: &crate::theme::Theme, rgb: u32) -> u32 {
+    if theme.dark {
+        return rgb;
+    }
+    match rgb {
+        CODE_KEYWORD => CODE_KEYWORD_LIGHT,
+        CODE_STRING => CODE_STRING_LIGHT,
+        CODE_COMMENT => CODE_COMMENT_LIGHT,
+        CODE_NUMBER => CODE_NUMBER_LIGHT,
+        other => other,
+    }
+}
 
 /// A code block's text in runs: its keywords, strings, numbers and comments
 /// in their colours, and the rest as one. A language ReCore doesn't know
@@ -1090,7 +1114,7 @@ impl<'c> crate::ctx::Ctx<'c> {
                 .border(crate::style::round(3));
         }
         if let Some(rgb) = run.color {
-            let color = crate::style::hex(rgb);
+            let color = crate::style::hex(code_ink(theme, rgb));
             piece = piece.color(color);
             // A mention of a person, a role or everyone, on a translucent
             // pill of its colour; other coloured text (a notice's names,
