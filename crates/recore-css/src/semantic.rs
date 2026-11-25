@@ -284,37 +284,65 @@ fn to_css(sheet: &Stylesheet, vars: &css::Vars, dark: bool, used: &BTreeSet<Stri
     out
 }
 
+/// Whether a byte continues a CSS identifier, so `myenv(` is not `env(`.
+fn identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || !byte.is_ascii()
+}
+
 /// The declarations `style-engine` 1.0.0 cannot settle but this reader can:
 /// `opacity` as a plain fraction, a duration as milliseconds, and a complete
 /// length function such as `round()` or `abs()` as pixels.
 /// Every `env(name, fallback)` replaced by its fallback, innermost first.
-/// An `env()` without one stays as written and the engine drops it.
+/// An `env()` without one stays as written and the engine drops it. A string,
+/// a comment and a `url(...)` keep theirs.
 fn resolve_env(value: &str) -> Cow<'_, str> {
-    let mut out = String::new();
-    let mut rest = value;
-    let mut changed = false;
-    while let Some(start) = css::find_ignore_case(rest, "env(") {
-        let after = &rest[start + 4..];
-        let Some(end) = css::matching_paren(after) else {
-            break;
-        };
-        let inside = &after[..end];
-        out.push_str(&rest[..start]);
-        let fallback = inside.split_once(',').map(|(_, fallback)| fallback.trim());
-        match fallback {
-            Some(fallback) => {
-                out.push_str(&resolve_env(fallback));
-                changed = true;
+    let bytes = value.as_bytes();
+    let mut out: Option<String> = None;
+    let mut written = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => index = skip_quoted(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => index = skip_comment(bytes, index),
+            b'u' | b'U'
+                if value
+                    .get(index..)
+                    .and_then(|rest| rest.get(..4))
+                    .is_some_and(|word| word.eq_ignore_ascii_case("url("))
+                    && (index == 0 || !identifier_byte(bytes[index - 1])) =>
+            {
+                index = skip_url(bytes, index);
             }
-            None => out.push_str(&rest[start..start + 4 + end + 1]),
+            _ => {
+                let after_ident = index > 0 && identifier_byte(bytes[index - 1]);
+                if !after_ident
+                    && value
+                        .get(index..)
+                        .and_then(|rest| rest.get(..4))
+                        .is_some_and(|word| word.eq_ignore_ascii_case("env("))
+                    && let Some(end) = css::matching_paren(&value[index + 4..])
+                {
+                    let inside = &value[index + 4..index + 4 + end];
+                    if let Some((_, fallback)) = inside.split_once(',') {
+                        let output = out.get_or_insert_with(|| String::with_capacity(value.len()));
+                        output.push_str(&value[written..index]);
+                        output.push_str(&resolve_env(fallback.trim()));
+                        written = index + 4 + end + 1;
+                    }
+                    index += 4 + end + 1;
+                    continue;
+                }
+                index += 1;
+            }
         }
-        rest = &after[end + 1..];
     }
-    if !changed {
-        return Cow::Borrowed(value);
+    match out {
+        Some(mut output) => {
+            output.push_str(&value[written..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(value),
     }
-    out.push_str(rest);
-    Cow::Owned(out)
 }
 
 fn declaration_value<'a>(name: &str, value: &'a str) -> Cow<'a, str> {
@@ -760,7 +788,16 @@ fn normalize_selector(selector: &str) -> Cow<'_, str> {
 /// The byte of the `]` that closes the `[` at `start`, respecting quotes.
 fn matching_bracket(selector: &str, start: usize) -> Option<usize> {
     let mut quote = None;
+    let mut escaped = false;
     for (offset, character) in selector[start + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
         match quote {
             Some(active) if character == active => quote = None,
             Some(_) => {}
@@ -806,10 +843,28 @@ fn lowercase_attribute(inside: &str) -> String {
 /// closing quote, an unquoted one at whitespace.
 fn split_attribute_value(text: &str) -> (&str, &str) {
     match text.as_bytes().first() {
-        Some(&quote @ (b'"' | b'\'')) => match text[1..].find(quote as char) {
-            Some(offset) => (&text[..offset + 2], &text[offset + 2..]),
-            None => (text, ""),
-        },
+        Some(&quote @ (b'"' | b'\'')) => {
+            let mut escaped = false;
+            let mut end = None;
+            for (offset, character) in text[1..].char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match character {
+                    '\\' => escaped = true,
+                    character if character == quote as char => {
+                        end = Some(offset);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(offset) => (&text[..offset + 2], &text[offset + 2..]),
+                None => (text, ""),
+            }
+        }
         _ => match text.find(char::is_whitespace) {
             Some(at) => (&text[..at], &text[at..]),
             None => (text, ""),
@@ -1812,22 +1867,6 @@ fn line(computed: &ComputedStyle, dark: bool) -> Option<Rgba> {
             PropertyId::BorderLeftColor,
             Some(PropertyId::BorderLeftStyle),
         ),
-        (
-            PropertyId::BorderInlineStartColor,
-            Some(PropertyId::BorderInlineStartStyle),
-        ),
-        (
-            PropertyId::BorderInlineEndColor,
-            Some(PropertyId::BorderInlineEndStyle),
-        ),
-        (
-            PropertyId::BorderBlockStartColor,
-            Some(PropertyId::BorderBlockStartStyle),
-        ),
-        (
-            PropertyId::BorderBlockEndColor,
-            Some(PropertyId::BorderBlockEndStyle),
-        ),
         (PropertyId::OutlineColor, Some(PropertyId::OutlineStyle)),
     ] {
         let Some(DeclValue::Color(value)) = computed.value(color_property) else {
@@ -2216,6 +2255,29 @@ mod tests {
 
         let theme = dark(r#"[class*="category_"] { font-size: abs(-12px); }"#);
         assert_eq!(theme.native.category_size, Some(12.0));
+    }
+
+    #[test]
+    fn env_fallbacks_skip_strings_comments_urls_and_other_names() {
+        assert_eq!(resolve_env("env(safe-area-inset-top, 4px)"), "4px");
+        assert_eq!(
+            resolve_env("env(one, env(two, calc(2px + 3px)))"),
+            "calc(2px + 3px)"
+        );
+        assert_eq!(resolve_env("myenv(x, 1px)"), "myenv(x, 1px)");
+        assert_eq!(
+            resolve_env(r#""env(x, 1px)" /* env(y, 2px) */ url(env(z, 3px))"#),
+            r#""env(x, 1px)" /* env(y, 2px) */ url(env(z, 3px))"#
+        );
+        // A byte inside a multi-byte character is not a slice boundary.
+        assert_eq!(resolve_env("Söhne env(x, 4px)"), "Söhne 4px");
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_an_attribute_value() {
+        let sheet = crate::css::parse(r#"[data-x="a\"]b"] { color: red }"#, |_, _| None);
+        let css = to_css(&sheet, &crate::css::Vars::default(), true, &BTreeSet::new());
+        assert!(css.contains(r#"[data-x="a\"]b"]"#), "{css}");
     }
 
     #[test]

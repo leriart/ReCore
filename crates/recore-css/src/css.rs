@@ -64,7 +64,7 @@ pub struct Declaration {
 /// it (whether they ask for a dark or a light colour scheme).
 #[derive(Clone, Debug, Default)]
 pub struct Rule {
-    /// The comma-separated selectors, each trimmed.
+    /// The rule's selectors, each trimmed.
     pub selectors: Vec<String>,
     /// The declarations in source order.
     pub declarations: Vec<Declaration>,
