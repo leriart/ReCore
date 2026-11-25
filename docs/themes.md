@@ -375,6 +375,14 @@ name something ReCore already paints:
 Generated content, icon masks and a pseudo-element's text (`content: "..."`)
 are not painted: ReCore colours the box it would draw, not the glyph in it.
 
+A few numbers are still left to the window even though the reader accepts
+them: a `font-size` that settles to the one the region already has (`1em`,
+`medium`, or a `pc` that comes to 16 px) is not recorded as a setting of its
+own, an explicit `initial` does the same, and `border-radius: 0` keeps the
+window's shape instead of squaring a panel. The reader's own notes (an import
+that could not be read, a block left open) carry no line number; the
+diagnostics for a declaration or selector the engine drops do.
+
 ### What CSS cannot do here
 
 A Discord CSS theme is still written for Discord's web window. ReCore matches

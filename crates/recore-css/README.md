@@ -95,6 +95,13 @@ not painted.
 
 ### Values and functions
 
+Lengths: `px`, `em`, `rem`, `%`, the absolute units (`pt`, `pc`, `in`,
+`cm`, `mm`, `Q`) and the viewport family (`vw`, `vh`, `vmin`, `vmax`, and
+the `sv*`/`lv*`/`dv*` forms), all settled to pixels at the 1280×720 reference
+window; `rem` follows the page's `font-size`. `calc()`, `min()`, `max()`,
+`clamp()`, `round()` and `abs()` work in a length, a time and an `opacity`,
+and `env()` takes its fallback.
+
 Colours: `#rgb`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()`, `hsl()`/`hsla()`,
 `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color(srgb ...)` and
 `color(display-p3 ...)`, `contrast-color()`, `light-dark()`, named colours,
