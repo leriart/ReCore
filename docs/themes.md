@@ -560,8 +560,15 @@ inputs by name.
 cargo test -p recore-css
 ```
 
-To see what ReCore read from a theme by hand:
+To see what ReCore read from a theme by hand, and every rule or declaration
+it left out with the line it sits on:
 
 ```bash
 cargo run -p recore-css --example read -- themes/Ambxst.theme.css
 ```
+
+The same detail is available to code: `Options { diagnostics: true, .. }`
+fills `ThemeFile::diagnostics` with a `Diagnostic` per dropped or skipped
+declaration, selector or at-rule (with `line` and `column`), plus the
+reader's own notes. It is off by default, since scanning a folder pays for a
+second parse.

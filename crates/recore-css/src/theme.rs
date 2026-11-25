@@ -417,6 +417,9 @@ pub struct ThemeFile {
     /// The custom properties Appearance can change, with their labels.
     pub options: Vec<crate::ThemeOption>,
     pub warnings: Vec<String>,
+    /// What the reader left out and where, when [`Options::diagnostics`] asked
+    /// for it.
+    pub diagnostics: Vec<Diagnostic>,
     /// Whether it names a remote import, font or picture, which a local scan
     /// leaves for the window to fetch when the theme is chosen.
     pub remote: bool,
@@ -443,6 +446,37 @@ pub struct Problem {
     pub message: String,
 }
 
+/// What the reader did with a rule or declaration it could not use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// Read, and kept in the file, but not painted here.
+    Skipped,
+    /// Read and dropped: the CSS has no meaning at that point.
+    Dropped,
+    /// The reader itself could not do something: a missing import, a block
+    /// left open, an at-rule it does not read.
+    Warning,
+}
+
+/// One thing the reader could not use, with where it sits in the theme.
+///
+/// A theme is written for another client, so a reader drops rules all the
+/// time; `ThemeFile::warnings` says what in a sentence, and these say where,
+/// for an editor or Appearance to point at. `Options::diagnostics` turns the
+/// collection on, since reading every scanned theme for them costs a second
+/// parse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    /// The file the declaration sits in, when it is not the theme itself.
+    pub file: Option<PathBuf>,
+    /// A 1-based line of the file, or 0 when the reader cannot say.
+    pub line: u32,
+    /// A 1-based column, or 0.
+    pub column: u32,
+    pub message: String,
+}
+
 /// How to read a theme.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -457,6 +491,10 @@ pub struct Options {
     /// Read the chosen page's style-engine paint list. `false` keeps the
     /// scan to the semantic values only.
     pub paint: bool,
+    /// Collect a [`Diagnostic`] for every rule or declaration left out, with
+    /// its line and column. Off by default: a scan of many themes pays a
+    /// second parse for it.
+    pub diagnostics: bool,
 }
 
 impl Default for Options {
@@ -467,6 +505,7 @@ impl Default for Options {
             overrides: Vec::new(),
             fonts: true,
             paint: false,
+            diagnostics: false,
         }
     }
 }
@@ -575,6 +614,9 @@ fn load_css_with_imports(
 /// CSS itself names neither.
 fn named(mut theme: ThemeFile, path: &Path) -> ThemeFile {
     theme.path = Some(path.to_path_buf());
+    for diagnostic in &mut theme.diagnostics {
+        diagnostic.file.get_or_insert_with(|| path.to_path_buf());
+    }
     if theme.name == "CSS theme"
         && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
     {
@@ -745,6 +787,11 @@ pub fn load_str_with_imports(
     );
     crate::options::apply_meta(&mut specs, &meta.vars);
     let name = meta.name.clone().unwrap_or_else(|| "CSS theme".to_owned());
+    let diagnostics = if options.diagnostics {
+        diagnostics_of(css, &warnings)
+    } else {
+        Vec::new()
+    };
     Ok(ThemeFile {
         id: format!("css:{}", slug(&name)),
         name,
@@ -762,8 +809,67 @@ pub fn load_str_with_imports(
         fonts,
         options: specs,
         warnings,
+        diagnostics,
         remote,
     })
+}
+
+/// What the engine drops or skips when it reads the theme's own text, with
+/// the line and column the file writes them on, plus the reader's own notes.
+fn diagnostics_of(css: &str, warnings: &[String]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let sheet = crate::style_engine::css::stylesheet::parse_stylesheet(css);
+    for warning in &sheet.report.warnings {
+        let severity = match warning.severity {
+            crate::style_engine::error::ParseSeverity::Dropped => Severity::Dropped,
+            _ => Severity::Skipped,
+        };
+        let message = warning.message.as_str();
+        // The engine also reports the selector it wraps a dropped
+        // declaration in as invalid, and the bare "invalid rule skipped"
+        // that follows a reported selector; either would say it twice.
+        if message.contains("invalid selector ':is(") || message == "invalid rule skipped" {
+            continue;
+        }
+        // The pseudo-elements ReCore paints itself, from its own rules.
+        const PAINTED: &[&str] = &[
+            "::-webkit-scrollbar",
+            "::selection",
+            "::placeholder",
+            "::before",
+            "::after",
+            "-moz-selection",
+            "-moz-placeholder",
+        ];
+        if PAINTED.iter().any(|pseudo| message.contains(pseudo)) {
+            continue;
+        }
+        // The engine's message carries its own parser's debug form after the
+        // selector; the line and column already say where it is.
+        let message = message
+            .split_once("': ParseError")
+            .map_or_else(|| message.to_owned(), |(before, _)| format!("{before}'"));
+        let diagnostic = Diagnostic {
+            severity,
+            file: None,
+            line: warning.line,
+            column: warning.column,
+            message,
+        };
+        if !diagnostics.contains(&diagnostic) {
+            diagnostics.push(diagnostic);
+        }
+    }
+    for warning in warnings {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            file: None,
+            line: 0,
+            column: 0,
+            message: warning.clone(),
+        });
+    }
+    diagnostics
 }
 
 /// Whether `path` was written as an absolute web address.
@@ -3084,6 +3190,44 @@ html.theme-light:not([data-rl-mode="dark"]) {
         let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
         assert_eq!(theme.palette.chat, Rgba::rgb(0x22, 0x22, 0x22));
         assert_eq!(theme.palette.sidebar, Rgba::rgb(0x33, 0x33, 0x33));
+    }
+
+    #[test]
+    fn a_diagnostic_says_what_was_left_out_and_where() {
+        let css = "\n:root { colour: #ff0000; color: #eeeeee; }\n[class*=\"sidebar_\"] { background: not-a-colour; }\n";
+        let options = Options {
+            diagnostics: true,
+            ..Options::with_mode(Mode::Dark)
+        };
+        let theme = load_str(css, None, &options).expect("readable");
+        let dropped: Vec<&Diagnostic> = theme
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Dropped)
+            .collect();
+        assert!(
+            dropped
+                .iter()
+                .any(|diagnostic| diagnostic.line == 2 && diagnostic.message.contains("colour")),
+            "the unknown property, on its line: {:?}",
+            theme.diagnostics
+        );
+        assert!(
+            dropped.iter().any(|diagnostic| diagnostic.line == 3
+                && diagnostic.message.to_lowercase().contains("background")),
+            "the bad value, on its line: {:?}",
+            theme.diagnostics
+        );
+        assert!(
+            theme
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.message.contains("invalid selector ':is(")),
+            "the engine's own wrapper is not a fault of the theme"
+        );
+        // Reading without asking keeps the collection empty.
+        let plain = load_str(css, None, &Options::with_mode(Mode::Dark)).expect("readable");
+        assert!(plain.diagnostics.is_empty());
     }
 
     #[test]

@@ -52,10 +52,10 @@ pub use style_engine;
 pub use style_engine as paint_engine;
 pub use style_engine::{DisplayList as Paint, PaintOp};
 pub use theme::{
-    Animation, AnimationDirection, AnimationFrame, BackgroundFit, Effects, Font, Gradient,
-    GradientKind, GradientStop, Image, Look, Mode, Motion, Options, PageLayout, Palette, Problem,
-    Scan, ThemeFile, load, load_str, load_str_with_imports, load_with, load_with_imports, palette,
-    scan, scan_with_imports, theme_files_fingerprint, theme_folders,
+    Animation, AnimationDirection, AnimationFrame, BackgroundFit, Diagnostic, Effects, Font,
+    Gradient, GradientKind, GradientStop, Image, Look, Mode, Motion, Options, PageLayout, Palette,
+    Problem, Scan, Severity, ThemeFile, load, load_str, load_str_with_imports, load_with,
+    load_with_imports, palette, scan, scan_with_imports, theme_files_fingerprint, theme_folders,
 };
 
 /// The version of the interpreter, shown beside a loaded theme.
