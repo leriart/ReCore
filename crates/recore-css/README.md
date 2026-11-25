@@ -74,7 +74,8 @@ failed, and `2` for a usage error.
 | `@property` | Syntax and `initial-value` fill a variable the theme does not set. |
 | `@container` | `style(...)` and `not style(...)` read the theme's own settled variables; size queries use the reference window. |
 | `@layer` | Statements and blocks; layer order is fixed before the cascade. |
-| `@charset`, `@namespace`, `@scope`, `@counter-style` | Parsed without error; not applied to a native window. |
+| `@charset`, `@namespace`, `@counter-style` | Parsed without error; not applied to a native window. |
+| `@scope` | Its rules are read as if unscoped: the native window has no DOM to limit them to, and a scope whose root sits outside a region would otherwise hide a theme's colours. |
 
 ### Selectors
 
