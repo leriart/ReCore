@@ -586,8 +586,8 @@ pub fn aside_width(app: &App) -> f32 {
     aside_room(app, app.layout.aside_width.unwrap_or(WIDTH))
 }
 
-/// The dim under the question before leaving.
-const DIM: iced::Color = iced::Color::from_rgba(0.0, 0.0, 0.0, 0xa0 as f32 / 255.0);
+/// How far the dim under the question before leaving goes.
+const DIM: f32 = 0.63;
 
 /// A composer of a panel beside the conversation, as the thread and forms
 /// have: a reply's bar over it, the files waiting, the Attach button, the
@@ -1084,11 +1084,12 @@ pub fn leave_question<'a>(
     .padding(16)
     .max_width(440)
     .style(move |_| crate::style::outlined(ground, edge, 10.0));
+    let dim = crate::media::scrim(theme, DIM);
     mouse_area(
         container(card)
             .padding([0, 16])
             .center(Length::Fill)
-            .style(|_| crate::style::fill(DIM)),
+            .style(move |_| crate::style::fill(dim)),
     )
     .on_press(Message::Nothing)
     .into()

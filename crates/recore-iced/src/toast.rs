@@ -9,7 +9,7 @@ use std::{
 };
 
 use iced::{
-    Alignment, Border, Color, Element, Length, Padding, Task,
+    Alignment, Border, Element, Length, Padding, Task,
     widget::{button, column, container},
 };
 use recore_core::chat::Alert;
@@ -164,7 +164,7 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
             radius: if theme.square { 0.0 } else { 8.0 }.into(),
         },
         shadow: iced::Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.55),
+            color: crate::media::scrim(theme, 0.55),
             offset: iced::Vector::new(0.0, 4.0),
             blur_radius: 18.0,
         },

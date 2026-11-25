@@ -37,7 +37,7 @@ pub fn files(
 pub fn play_badge<'a>(ctx: crate::ctx::Ctx<'a>) -> Element<'a, Message> {
     container(ctx.look.glyph(Icon::PlayMark, 20, Color::WHITE))
         .center(PLAY_BADGE)
-        .style(|_| rounded(crate::style::SMOKE, PLAY_BADGE / 2.0))
+        .style(|_| rounded(media::COVER, PLAY_BADGE / 2.0))
         .into()
 }
 
@@ -129,7 +129,7 @@ fn cells<'a>(
                 )
                 .size(SAVE_BUTTON, 20)
                 .ink(Color::WHITE)
-                .fill(crate::style::SMOKE);
+                .fill(media::COVER);
             shot = stack![
                 shot,
                 container(save)
@@ -178,7 +178,7 @@ fn gif_badge<'a>() -> Element<'a, Message> {
     container(text("GIF").size(13).font(BOLD()).color(Color::WHITE))
         .center_x(29)
         .center_y(22)
-        .style(|_| rounded(Color::from_rgba8(0x00, 0x02, 0x05, 0xb3 as f32 / 255.0), 4))
+        .style(|_| rounded(media::COVER, 4))
         .into()
 }
 

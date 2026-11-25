@@ -352,15 +352,15 @@ pub fn view<'a>(ctx: crate::ctx::Ctx<'a>) -> Element<'a, Message> {
     };
     let alert = |on: bool| if on { theme.danger } else { theme.text };
     // A muted or deafened device keeps a dark ground as Discord's does:
-    // measured over a nameplate, 20% of a near-black red, which on the
-    // plain panel reads as the same step down, with the faint seam
-    // Discord draws between the toggle and its caret.
+    // a step down from the card, with the faint seam Discord draws
+    // between the toggle and its caret. The ground is the theme's own,
+    // darkened, so it steps down on a light theme and a dark one alike.
     let dimmed = |on: bool, pair: iced::widget::Row<'a, Message>| -> Element<'a, Message> {
         if !on {
             return pair.into();
         }
-        let dark = iced::Color::from_rgba8(0x1e, 0, 0, 0.2);
-        let seam = iced::Color::from_rgba8(0, 0, 0, 0.15);
+        let dark = crate::media::scrim(theme, 0.2);
+        let seam = crate::media::scrim(theme, 0.15);
         stack![
             container(pair)
                 .height(32)
