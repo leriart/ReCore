@@ -65,7 +65,10 @@ says why until Got It. They wait over the text as
 tiles: a picture's preview (made off the window's thread at 240 px and
 let go with its file) or a file's icon, either under the SPOILER cover
 once marked, the name and size, the spoiler button where the room has
-spoilers, and the X.
+spoilers, and the X. A file without a preview says what kind it is beside
+its name (PDF, ZIP, IMG, VID, AUD, TXT, CODE or FILE), from its extension,
+in a sunken cap, and its page icon carries the same mark (`uploads::kind_of`,
+`kind_icon`); a picture's preview says it already.
 
 **Settings → Messages** has two optional privacy controls for Discord
 uploads. **Remove metadata from image attachments** removes optional metadata

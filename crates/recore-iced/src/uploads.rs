@@ -448,12 +448,12 @@ fn staged_tile<'a>(
 ) -> Element<'a, Message> {
     let theme = ctx.look.theme;
     let inner = TILE.width - 12.0;
-    let picture: Element<'a, Message> = match ctx
+    let preview = ctx
         .uploads
         .thumbnails
         .get(&file.path)
-        .and_then(Option::as_ref)
-    {
+        .and_then(Option::as_ref);
+    let picture: Element<'a, Message> = match preview {
         Some(picture) => ctx.shot(
             Shot::new(Some(picture), Size::new(inner, TILE_PICTURE))
                 .fit(Fit::Cover)
@@ -462,7 +462,7 @@ fn staged_tile<'a>(
         ),
         None => {
             let ground = theme.sidebar;
-            let icon = container(ctx.look.glyph(Icon::File, 32, theme.muted))
+            let icon = container(ctx.look.glyph(kind_icon(&file.name), 32, theme.muted))
                 .center_x(inner)
                 .center_y(TILE_PICTURE)
                 .style(move |_| rounded(ground, 6));
@@ -477,12 +477,20 @@ fn staged_tile<'a>(
             }
         }
     };
+    let name = text(file.name.clone())
+        .size(13)
+        .font(MEDIUM())
+        .color(theme.text)
+        .wrapping(text::Wrapping::None);
+    // A preview says what kind of picture it is; a file's words say what
+    // kind of file it is, in a word.
+    let name = if preview.is_some() {
+        row![name]
+    } else {
+        row![kind_badge(&file.name, theme), name]
+    };
     let words = column![
-        text(file.name.clone())
-            .size(13)
-            .font(MEDIUM())
-            .color(theme.text)
-            .wrapping(text::Wrapping::None),
+        name.spacing(4).width(inner).clip(true),
         text(chat::file_size(file.size))
             .size(12)
             .color(theme.muted)
@@ -536,6 +544,50 @@ fn staged_tile<'a>(
             .align_x(Alignment::End)
     ]
     .into()
+}
+
+/// The icon of [`kind_badge`]' words.
+fn kind_icon(name: &str) -> Icon {
+    match kind_of(name) {
+        "PDF" => Icon::FilePdf,
+        "ZIP" => Icon::FileZip,
+        "IMG" => Icon::FileImage,
+        "VID" => Icon::FileVideo,
+        "AUD" => Icon::FileAudio,
+        "CODE" => Icon::FileCode,
+        _ => Icon::File,
+    }
+}
+
+/// A file's kind, in a short word: PDF, ZIP, IMG, VID, AUD, TXT, CODE, or
+/// FILE when the name says nothing more.
+fn kind_badge<'a>(name: &str, theme: &crate::theme::Theme) -> Element<'a, Message> {
+    let label = kind_of(name);
+    let ground = theme.sunken;
+    container(text(label).size(10).font(BOLD()).color(theme.secondary))
+        .padding([1, 4])
+        .style(move |_| rounded(ground, 4))
+        .into()
+}
+
+/// The word [`kind_badge`] shows for `name`, from its extension.
+fn kind_of(name: &str) -> &'static str {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return "FILE";
+    };
+    match extension.to_ascii_lowercase().as_str() {
+        "pdf" => "PDF",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" => "ZIP",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" | "heic" | "ico" => "IMG",
+        "mp4" | "mov" | "webm" | "mkv" | "avi" | "m4v" | "mpg" | "mpeg" => "VID",
+        "mp3" | "wav" | "ogg" | "oga" | "flac" | "m4a" | "opus" | "aac" | "aiff" => "AUD",
+        "txt" | "md" | "rtf" | "log" | "csv" | "doc" | "docx" | "odt" => "TXT",
+        "rs" | "py" | "js" | "mjs" | "ts" | "tsx" | "jsx" | "go" | "c" | "h" | "hpp" | "cpp"
+        | "cc" | "java" | "kt" | "swift" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish"
+        | "json" | "toml" | "yaml" | "yml" | "xml" | "html" | "htm" | "css" | "scss" | "sql"
+        | "lua" | "nix" | "asm" | "s" => "CODE",
+        _ => "FILE",
+    }
 }
 
 /// A tile's round button, white on a dark disc.
@@ -666,4 +718,39 @@ pub fn drop_view<'a>(ctx: crate::ctx::Ctx<'a>) -> Option<Element<'a, Message>> {
         .on_press(Message::Write(Write::Uploads(Event::Understood)))
         .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kind_of;
+
+    #[test]
+    fn a_files_kind_comes_from_its_extension_in_any_case() {
+        for (name, kind) in [
+            ("Report.PDF", "PDF"),
+            ("shaders.zip", "ZIP"),
+            ("photo.JPEG", "IMG"),
+            ("clip.webm", "VID"),
+            ("theme.opus", "AUD"),
+            ("notes.md", "TXT"),
+            ("main.rs", "CODE"),
+            ("README", "FILE"),
+            (".gitignore", "FILE"),
+            ("archive.unknown", "FILE"),
+        ] {
+            assert_eq!(kind_of(name), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_files_kind_has_its_page_icon() {
+        use crate::pictures::Icon;
+        assert_eq!(super::kind_icon("a.pdf"), Icon::FilePdf);
+        assert_eq!(super::kind_icon("a.zip"), Icon::FileZip);
+        assert_eq!(super::kind_icon("a.png"), Icon::FileImage);
+        assert_eq!(super::kind_icon("a.mp4"), Icon::FileVideo);
+        assert_eq!(super::kind_icon("a.mp3"), Icon::FileAudio);
+        assert_eq!(super::kind_icon("a.rs"), Icon::FileCode);
+        assert_eq!(super::kind_icon("README"), Icon::File);
+    }
 }

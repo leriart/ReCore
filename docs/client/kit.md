@@ -140,7 +140,14 @@ and the app uses them with its one `Message`, so nothing is mapped:
   kept in `icons::Icons` until the window goes or the theme changes;
   `Pic::boxed`
   centres it (or any picture) in a square, for a button's face or a badge;
-  `Look::icon_button` is the icon button.
+  `Look::icon_button` is the icon button. The files keep the shape the
+  client draws: Discord's small glyphs are 16 px filled pixels (a file's
+  page, a channel's mark), action glyphs are 24 px with a 2 px round
+  stroke, and the title bar's caption buttons are 10 px strokes of their
+  own; a status overlay on a glyph may thicken its slash or its lock.
+  A file's six page marks are 16 px like `file.svg`: `file-pdf`,
+  `file-zip`, `file-image`, `file-video`, `file-audio` and `file-code`,
+  drawn once and reused by `uploads` for its tiles.
 - `Ctx::avatar` and `Ctx::face`: an avatar, with its decoration and
   presence dot (`paint::status_dot`, offline's and invisible's a faint
   dot with a hole; lists that leave it off for offline people leave it

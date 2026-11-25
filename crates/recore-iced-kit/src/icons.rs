@@ -163,6 +163,13 @@ pub enum Icon {
     /// of its 33 px square.
     ReplySpine,
     File,
+    /// A file whose kind is known: a page with its mark.
+    FilePdf,
+    FileZip,
+    FileImage,
+    FileVideo,
+    FileAudio,
+    FileCode,
     Download,
     /// A filled triangle, the mark over a video's poster.
     PlayMark,
@@ -246,6 +253,12 @@ impl Icon {
         match self {
             Icon::History => icon!("history.svg"),
             Icon::File => icon!("file.svg"),
+            Icon::FilePdf => icon!("file-pdf.svg"),
+            Icon::FileZip => icon!("file-zip.svg"),
+            Icon::FileImage => icon!("file-image.svg"),
+            Icon::FileVideo => icon!("file-video.svg"),
+            Icon::FileAudio => icon!("file-audio.svg"),
+            Icon::FileCode => icon!("file-code.svg"),
             Icon::Download => icon!("download.svg"),
             Icon::PlayMark => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M2 0 L20 10 L2 20 Z" fill="currentColor" /></svg>"#
