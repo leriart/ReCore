@@ -888,6 +888,7 @@ pub fn load_str_with_imports(
         &vars,
         palette,
         directory,
+        dark,
         &fonts,
         options,
         animations,
@@ -1275,27 +1276,11 @@ impl Entry<'_> {
     /// and unlayered rules beat every layer. The weight packs the layer in
     /// above the selector's specificity.
     ///
-    /// An `!important` declaration reverses the layer order: the first
-    /// layer wins, and a rule outside any layer — an implicit final layer —
-    /// loses to every layer that was named. The two kinds of weight are
-    /// never compared with each other, so each may use the whole range.
+    /// The packing and what an `!important` rule does to it live in
+    /// [`css::layer_weight`], so the reader's cascade and the engine's read
+    /// the same weight.
     fn layer_specificity(&self) -> u32 {
-        if self.declaration.important {
-            let layer = match self.layer {
-                // The earlier a layer comes, the more its important
-                // declarations weigh.
-                Some(rank) => {
-                    u32::MAX.saturating_sub(rank.saturating_add(1).saturating_mul(1_000_000))
-                }
-                // A rule outside any layer is the last of all.
-                None => 0,
-            };
-            return layer.saturating_add(self.specificity.min(999_999));
-        }
-        let layer = self.layer.map_or(1_000_000_000, |rank| {
-            rank.saturating_add(1).saturating_mul(1_000_000)
-        });
-        layer.saturating_add(self.specificity.min(999_999))
+        css::layer_weight(self.layer, self.specificity)
     }
 }
 
@@ -1946,7 +1931,7 @@ fn duration(vars: &css::Vars, name: &str) -> Option<f32> {
     }
 }
 
-fn image(vars: &css::Vars, directory: Option<&Path>, names: &[&str]) -> Option<Image> {
+fn image(vars: &css::Vars, directory: Option<&Path>, names: &[&str], light: bool) -> Option<Image> {
     for name in names {
         let Some(raw) = vars.get(name) else {
             continue;
@@ -1954,7 +1939,7 @@ fn image(vars: &css::Vars, directory: Option<&Path>, names: &[&str]) -> Option<I
         let Some(value) = vars.resolve(raw) else {
             continue;
         };
-        if let Some(image) = image_value(&value, vars.origin(name), directory) {
+        if let Some(image) = image_value(&value, vars.origin(name), directory, light) {
             return Some(image);
         }
     }
@@ -1962,11 +1947,16 @@ fn image(vars: &css::Vars, directory: Option<&Path>, names: &[&str]) -> Option<I
 }
 
 /// A `url(...)` or a bare path, as a variable or a `body` rule names it.
-fn image_value(value: &str, origin: Option<&str>, directory: Option<&Path>) -> Option<Image> {
+fn image_value(
+    value: &str,
+    origin: Option<&str>,
+    directory: Option<&Path>,
+    light: bool,
+) -> Option<Image> {
     if value.trim().eq_ignore_ascii_case("none") {
         return None;
     }
-    if let Some(gradient) = gradient(value) {
+    if let Some(gradient) = gradient_with(value, light) {
         return Some(Image::Gradient(gradient));
     }
     let path = if let Some(start) = css::find_ignore_case(value, "url(") {
@@ -2001,6 +1991,12 @@ fn image_value(value: &str, origin: Option<&str>, directory: Option<&Path>) -> O
 /// Reads a CSS gradient in a `background`/`background-image` value. ReCore
 /// paints the common three kinds; repeating variants use the same stops.
 pub(crate) fn gradient(value: &str) -> Option<Gradient> {
+    gradient_with(value, false)
+}
+
+/// [`gradient`] for an appearance: `light` chooses which branch of a
+/// `light-dark()` stop the gradient takes.
+pub(crate) fn gradient_with(value: &str, light: bool) -> Option<Gradient> {
     let lower = value.to_ascii_lowercase();
     // The repeating name contains the plain one, so it is matched first.
     let (kind, at) = if let Some(at) = css::find_ignore_case(value, "repeating-linear-gradient(") {
@@ -2073,28 +2069,91 @@ pub(crate) fn gradient(value: &str) -> Option<Gradient> {
             first = 1;
         }
     }
+    // A stop's position is a fraction of the line the gradient runs along,
+    // whose length the reference window fixes: a length in pixels is that
+    // much of the line. A conic gradient measures its stops as angles.
+    let (width, height) = css::VIEWPORT;
+    let extent = match kind {
+        GradientKind::Linear(degrees) => {
+            let radians = degrees.to_radians();
+            width * radians.sin().abs() + height * radians.cos().abs()
+        }
+        GradientKind::Radial => (width / 2.0).hypot(height / 2.0),
+        GradientKind::Conic => 360.0,
+    };
     let mut stops = Vec::new();
     for part in parts.into_iter().skip(first) {
-        let mut tokens = color::split_top(part.trim(), ' ');
         let mut color = None;
-        let mut position = None;
-        for token in &mut tokens {
+        let mut positions = Vec::new();
+        for token in color::split_top(part.trim(), ' ') {
             let token = token.trim();
-            if let Some(found) = color::parse(token, false) {
+            if token.is_empty() {
+                continue;
+            }
+            if color.is_none()
+                && let Some(found) = color::parse(token, light)
+            {
                 color = Some(found);
-            } else if let Some(value) = token.strip_suffix('%') {
-                position = value
-                    .trim()
-                    .parse::<f32>()
-                    .ok()
-                    .map(|value| (value / 100.0).clamp(0.0, 1.0));
+            } else if let Some(position) = stop_position(token, kind, extent) {
+                positions.push(position);
             }
         }
-        if let Some(color) = color {
-            stops.push(GradientStop { color, position });
+        let Some(color) = color else {
+            continue;
+        };
+        // A stop with two positions is a hard edge: the colour holds from
+        // the first to the second.
+        if positions.is_empty() {
+            stops.push(GradientStop {
+                color,
+                position: None,
+            });
+        }
+        for position in positions {
+            stops.push(GradientStop {
+                color,
+                position: Some(position),
+            });
         }
     }
     (stops.len() >= 2).then_some(Gradient { kind, stops })
+}
+
+/// One stop position as a fraction of the gradient's line: a percentage, a
+/// length, or — along a conic gradient — an angle.
+fn stop_position(token: &str, kind: GradientKind, extent: f32) -> Option<f32> {
+    let lower = token.trim().to_ascii_lowercase();
+    if let Some(value) = lower.strip_suffix('%') {
+        return value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|value| (value / 100.0).clamp(0.0, 1.0));
+    }
+    let angle = if let Some(value) = lower.strip_suffix("deg") {
+        value.trim().parse::<f32>().ok()
+    } else if let Some(value) = lower.strip_suffix("turn") {
+        value.trim().parse::<f32>().ok().map(|turns| turns * 360.0)
+    } else if let Some(value) = lower.strip_suffix("rad") {
+        value.trim().parse::<f32>().ok().map(f32::to_degrees)
+    } else if let Some(value) = lower.strip_suffix("grad") {
+        value.trim().parse::<f32>().ok().map(|grads| grads * 0.9)
+    } else {
+        None
+    };
+    if let Some(angle) = angle {
+        // Only a conic gradient measures along an angle; a linear one would
+        // have taken it as its direction, and a radial has none.
+        return matches!(kind, GradientKind::Conic).then(|| (angle / 360.0).rem_euclid(1.0));
+    }
+    if extent <= 0.0 {
+        return None;
+    }
+    // A length: absolute and viewport units become pixels first, so `9pt`
+    // settles here as it does elsewhere.
+    let value = crate::css::normalize_units(&lower);
+    let length = eval_length(&value)?;
+    Some((length / extent).clamp(0.0, 1.0))
 }
 
 fn matching_paren(text: &str, open: usize) -> Option<usize> {
@@ -2295,7 +2354,7 @@ fn direct_background(
             let Some(value) = vars.resolve(&declaration.value) else {
                 continue;
             };
-            if let Some(image) = image_value(&value, rule.origin.as_deref(), directory) {
+            if let Some(image) = image_value(&value, rule.origin.as_deref(), directory, !dark) {
                 found = Some(image);
             }
         }
@@ -2909,6 +2968,7 @@ fn look(
     vars: &css::Vars,
     palette: Palette,
     directory: Option<&Path>,
+    dark: bool,
     fonts: &[Font],
     options: &Options,
     animations: Vec<Animation>,
@@ -3013,6 +3073,7 @@ fn look(
                 "--background",
                 "--recore-background",
             ],
+            !dark,
         )
         .or(direct_background),
         background_dim: fraction(vars, &["--rl-background-dim"]),
