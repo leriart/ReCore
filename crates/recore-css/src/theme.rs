@@ -824,6 +824,9 @@ pub fn load_str_with_imports(
         }
     }
     let mut sheet = sheet;
+    // The sheet's own warnings are taken out early: the rules are borrowed
+    // from here on, and a borrow cannot be broken by moving a field out.
+    let sheet_warnings = std::mem::take(&mut sheet.warnings);
     let has_containers = sheet.rules.iter().any(|rule| !rule.containers.is_empty());
     // A container query must not decide the palette before its own
     // condition is settled; the rules outside one are the base it reads.
@@ -880,7 +883,7 @@ pub fn load_str_with_imports(
         .paint
         .then(|| crate::semantic::paint(&sheet, &vars, dark))
         .flatten();
-    warnings.extend(sheet.warnings);
+    warnings.extend(sheet_warnings);
     let mut look = look(
         &vars,
         palette,
@@ -947,6 +950,9 @@ fn warn_about_variables(sheet: &Stylesheet, vars: &css::Vars, warnings: &mut Vec
             }
         }
     }
+    // A name that names itself back is worth saying once, however many
+    // declarations use it; resolving it walks its whole chain.
+    let mut broken: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
     for rule in &sheet.rules {
         for declaration in &rule.declarations {
             let mut rest = declaration.value.as_str();
@@ -962,7 +968,10 @@ fn warn_about_variables(sheet: &Stylesheet, vars: &css::Vars, warnings: &mut Vec
                         if !warnings.contains(&note) {
                             warnings.push(note);
                         }
-                    } else if vars.contains(name) && vars.resolve(&format!("var({name})")).is_none()
+                    } else if vars.contains(name)
+                        && *broken
+                            .entry(name)
+                            .or_insert_with(|| vars.resolve(&format!("var({name})")).is_none())
                     {
                         let note = format!(
                             "the variable {name} names itself back, or grows past the reader's budget"
@@ -1180,26 +1189,32 @@ fn read_font(
 /// to, in source order: `None` for both, `Some(true)` for the dark palette and
 /// `Some(false)` for the light one.
 #[derive(Default)]
-struct Collected {
-    entries: Vec<Entry>,
+struct Collected<'a> {
+    entries: Vec<Entry<'a>>,
+    /// Whether any rule names the light appearance. A theme that does not
+    /// need no light palette, and building one costs a whole map of every
+    /// property the theme declares.
+    light: bool,
 }
 
-struct Entry {
-    declaration: css::Declaration,
+struct Entry<'a> {
+    /// The declaration, borrowed from the sheet: a theme with thousands of
+    /// properties would otherwise copy every one of them twice.
+    declaration: &'a css::Declaration,
     dark: Option<bool>,
     specificity: u32,
     order: usize,
-    origin: Option<String>,
+    origin: Option<&'a str>,
     layer: Option<u32>,
 }
 
-fn collect(sheet: &Stylesheet) -> Collected {
+fn collect(sheet: &Stylesheet) -> Collected<'_> {
     collect_where(sheet, |_| true)
 }
 
 /// [`collect`] over the rules `allow` names, so a `@container style(...)`
 /// that does not match the theme's root values cannot set the palette.
-fn collect_where(sheet: &Stylesheet, allow: impl Fn(&css::Rule) -> bool) -> Collected {
+fn collect_where(sheet: &Stylesheet, allow: impl Fn(&css::Rule) -> bool) -> Collected<'_> {
     let mut collected = Collected::default();
     let mut order = 0usize;
     for rule in &sheet.rules {
@@ -1221,13 +1236,16 @@ fn collect_where(sheet: &Stylesheet, allow: impl Fn(&css::Rule) -> bool) -> Coll
                 (None, Some(dark)) => Some(dark),
                 (None, None) => None,
             };
+            if scope == Some(false) {
+                collected.light = true;
+            }
             for declaration in &rule.declarations {
                 collected.entries.push(Entry {
-                    declaration: declaration.clone(),
+                    declaration,
                     dark: scope,
                     specificity,
                     order,
-                    origin: rule.origin.clone(),
+                    origin: rule.origin.as_deref(),
                     layer: rule.layer,
                 });
                 order += 1;
@@ -1252,11 +1270,28 @@ fn selector_is_explicit(selector: &str) -> bool {
         || lower.contains("data-rl-mode='dark'")
 }
 
-impl Entry {
+impl Entry<'_> {
     /// CSS layers outrank specificity: a later layer beats an earlier one,
     /// and unlayered rules beat every layer. The weight packs the layer in
     /// above the selector's specificity.
+    ///
+    /// An `!important` declaration reverses the layer order: the first
+    /// layer wins, and a rule outside any layer — an implicit final layer —
+    /// loses to every layer that was named. The two kinds of weight are
+    /// never compared with each other, so each may use the whole range.
     fn layer_specificity(&self) -> u32 {
+        if self.declaration.important {
+            let layer = match self.layer {
+                // The earlier a layer comes, the more its important
+                // declarations weigh.
+                Some(rank) => {
+                    u32::MAX.saturating_sub(rank.saturating_add(1).saturating_mul(1_000_000))
+                }
+                // A rule outside any layer is the last of all.
+                None => 0,
+            };
+            return layer.saturating_add(self.specificity.min(999_999));
+        }
         let layer = self.layer.map_or(1_000_000_000, |rank| {
             rank.saturating_add(1).saturating_mul(1_000_000)
         });
@@ -1264,7 +1299,7 @@ impl Entry {
     }
 }
 
-impl Collected {
+impl Collected<'_> {
     /// The cascade for `dark`.
     fn vars_with(&self, dark: bool) -> css::Vars {
         let mut vars = css::Vars::default();
@@ -1273,10 +1308,10 @@ impl Collected {
                 continue;
             }
             vars.insert_weighted(
-                &entry.declaration,
+                entry.declaration,
                 entry.layer_specificity(),
                 entry.order,
-                entry.origin.as_deref(),
+                entry.origin,
             );
         }
         vars
@@ -1296,18 +1331,20 @@ impl Collected {
         if let Some(dark) = appearance_of(&dark_vars, false) {
             return Some(dark);
         }
-        let light_vars = self.vars_with(false);
-        if let Some(dark) = appearance_of(&light_vars, true) {
-            return Some(dark);
+        if self.light {
+            let light_vars = self.vars_with(false);
+            if let Some(dark) = appearance_of(&light_vars, true) {
+                return Some(dark);
+            }
         }
         let mut vars = css::Vars::default();
         for entry in &self.entries {
             if entry.dark.is_none() {
                 vars.insert_weighted(
-                    &entry.declaration,
+                    entry.declaration,
                     entry.layer_specificity(),
                     entry.order,
-                    entry.origin.as_deref(),
+                    entry.origin,
                 );
             }
         }
@@ -1344,7 +1381,7 @@ fn appearance_of(vars: &css::Vars, light: bool) -> Option<bool> {
     Some(background.is_dark())
 }
 
-fn choose_dark(collected: &Collected, mode: Mode, warnings: &mut Vec<String>) -> bool {
+fn choose_dark(collected: &Collected<'_>, mode: Mode, warnings: &mut Vec<String>) -> bool {
     match mode {
         Mode::Dark => true,
         Mode::Light => false,
@@ -2096,7 +2133,7 @@ fn matching_paren(text: &str, open: usize) -> Option<usize> {
 /// the accent and the options the person changed.
 fn settle_vars(
     sheet: &Stylesheet,
-    collected: &Collected,
+    collected: &Collected<'_>,
     dark: bool,
     options: &Options,
 ) -> css::Vars {
@@ -3032,7 +3069,7 @@ fn looks_like_animation_name(token: &str) -> bool {
 
 fn animations(
     sheet: &Stylesheet,
-    _collected: &Collected,
+    _collected: &Collected<'_>,
     dark: bool,
     vars: &css::Vars,
     warnings: &mut Vec<String>,
@@ -3544,7 +3581,7 @@ fn parse_all(files: Vec<(PathBuf, String, u64)>) -> Vec<(PathBuf, Result<ThemeFi
 /// window; this keeps the second read to a clone.
 fn parse_one(path: &Path, css: &str, fingerprint: u64) -> Result<ThemeFile, String> {
     let key = (path.to_path_buf(), fingerprint);
-    if let Some(theme) = cache()
+    if let Some((_, theme)) = cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
@@ -3555,15 +3592,40 @@ fn parse_one(path: &Path, css: &str, fingerprint: u64) -> Result<ThemeFile, Stri
     let mut cache = cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cache.len() >= 32 {
-        cache.clear();
+    // The oldest theme goes, not all of them: a folder of forty themes
+    // should not make the window read all forty again.
+    while cache.len() >= CACHED_THEMES {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (stamp, _))| *stamp)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
     }
-    cache.insert(key, theme.clone());
+    let stamp = cache
+        .values()
+        .map(|(stamp, _)| *stamp)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1);
+    cache.insert(key, (stamp, theme.clone()));
     Ok(theme)
 }
 
-fn cache() -> &'static Mutex<BTreeMap<(PathBuf, u64), ThemeFile>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<(PathBuf, u64), ThemeFile>>> = OnceLock::new();
+/// How many parsed themes the reader keeps, so the window reads a theme
+/// once rather than again for every frame.
+const CACHED_THEMES: usize = 32;
+
+/// A theme's key: the file it came from and the fingerprint of its bytes.
+type CacheKey = (PathBuf, u64);
+
+/// A parsed theme and when it was read, so the oldest can go first.
+type CacheEntry = (u64, ThemeFile);
+
+fn cache() -> &'static Mutex<BTreeMap<CacheKey, CacheEntry>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<CacheKey, CacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -4957,5 +5019,42 @@ html.theme-light:not([data-rl-mode="dark"]) {
         assert_eq!(scan.themes.len(), 2);
         assert_eq!(scan.themes[0].name, "ReCord");
         fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn an_unlayered_declaration_beats_a_layered_one() {
+        // A rule outside any layer sits in an implicit final layer, which
+        // is the last of all for an ordinary declaration.
+        let css = r#"
+@layer base { :root { --background-primary: #111111; } }
+@layer theme { :root { --background-primary: #222222; } }
+:root { --background-primary: #333333; }
+"#;
+        let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x33, 0x33, 0x33));
+    }
+
+    #[test]
+    fn an_important_declaration_in_an_earlier_layer_wins() {
+        // CSS reverses the layer order for important declarations: the
+        // first layer wins, and a rule outside any layer — an implicit
+        // final layer — loses to every layer that was named.
+        let css = r#"
+@layer base { :root { --background-primary: #111111 !important; } }
+@layer theme { :root { --background-primary: #222222 !important; } }
+:root { --background-primary: #333333 !important; }
+"#;
+        let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x11, 0x11, 0x11));
+    }
+
+    #[test]
+    fn an_important_declaration_beats_an_ordinary_one() {
+        let css = r#"
+:root { --background-primary: #111111 !important; }
+#app-mount { --background-primary: #222222; }
+"#;
+        let theme = load_str(css, None, &Options::with_mode(Mode::Dark)).unwrap();
+        assert_eq!(theme.palette.chat, Rgba::rgb(0x11, 0x11, 0x11));
     }
 }
