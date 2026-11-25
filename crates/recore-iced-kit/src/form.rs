@@ -83,9 +83,9 @@ pub fn note_in<'a, M: Clone + 'a>(
     text(words).size(13).color(ink).width(Length::Fill).into()
 }
 
-/// What went wrong, on a form or a dialog: 14 px in the danger's ink.
+/// What went wrong, on a form or a dialog: 14 px in the danger's text ink.
 pub fn error<'a>(theme: &Theme, words: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    text(words).size(14).color(theme.danger)
+    text(words).size(14).color(theme.danger_text)
 }
 
 /// The line between a page's parts.

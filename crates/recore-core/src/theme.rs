@@ -193,7 +193,7 @@ pub const RECORE_LIGHT: Theme = Theme {
     faint: rgb(0x8a7560),
     accent: rgb(0xe94221),
     accent_hover: rgb(0xc3371b),
-    on_accent: rgb(0xefe4d0),
+    on_accent: rgb(0x000000),
     accent_soft: rgba(0xe9422129),
     danger: rgb(0xc22a10),
     danger_hover: rgb(0xa9230e),
@@ -240,7 +240,7 @@ pub const YAP: Theme = Theme {
     accent_soft: rgba(0xffbf4726),
     danger: rgb(0xf0545e),
     danger_hover: rgb(0xf46f77),
-    on_danger: rgb(0xffffff),
+    on_danger: rgb(0x1d1607),
     live: rgb(0x3ecf7e),
     loud: rgb(0xff8c42),
     link: rgb(0x64adf6),
@@ -452,7 +452,7 @@ const NORD: Theme = Theme {
     accent_soft: rgba(0x88c0d026),
     danger: rgb(0xbf616a),
     danger_hover: rgb(0xc6767f),
-    on_danger: rgb(0xeceff4),
+    on_danger: rgb(0x000000),
     live: rgb(0xa3be8c),
     loud: rgb(0xd08770),
     link: rgb(0x81a1c1),
@@ -571,14 +571,14 @@ const ROSE_PINE_DAWN: Theme = Theme {
     text: rgb(0x575279),
     secondary: rgb(0x797593),
     muted: rgb(0x87829b),
-    faint: rgb(0x9893a5),
+    faint: rgb(0x948fa1),
     accent: rgb(0xd7827e),
     accent_hover: rgb(0xc9767c),
-    on_accent: rgb(0x39354f),
+    on_accent: rgb(0x232136),
     accent_soft: rgba(0xd7827e2e),
     danger: rgb(0xb4637a),
     danger_hover: rgb(0x9d5f7a),
-    on_danger: rgb(0xfffaf3),
+    on_danger: rgb(0x000000),
     live: rgb(0x56949f),
     loud: rgb(0xea9d34),
     link: rgb(0x286983),
@@ -616,7 +616,7 @@ const SAKURA: Theme = Theme {
     faint: rgb(0xa8899a),
     accent: rgb(0xd5588a),
     accent_hover: rgb(0xc44a7b),
-    on_accent: rgb(0xffffff),
+    on_accent: rgb(0x000000),
     accent_soft: rgba(0xd5588a24),
     danger: rgb(0xd2404f),
     danger_hover: rgb(0xbd3242),
@@ -988,5 +988,84 @@ mod tests {
             custom.theme
         );
         assert_eq!(chosen(Some("gone"), &[custom]).0, "recore");
+    }
+
+    /// The WCAG contrast ratio between two colours.
+    fn contrast(a: Colour, b: Colour) -> f32 {
+        let luminance = |colour: Colour| {
+            let channel = |value: u8| {
+                let value = f32::from(value) / 255.0;
+                if value <= 0.040_45 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(colour.red())
+                + 0.7152 * channel(colour.green())
+                + 0.0722 * channel(colour.blue())
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn every_built_in_theme_reads_its_ink() {
+        // Each pair: its name, its ink, its ground, and the least ratio it
+        // keeps. Type, and words on the accent and on red, need 4.5:1; faint,
+        // the quietest step, promises 2.5:1 (docs/themes.md).
+        type Slot = fn(&Theme) -> Colour;
+        let pairs: [(&str, Slot, Slot, f32); 6] = [
+            ("text/chat", |theme| theme.text, |theme| theme.chat, 4.5),
+            (
+                "secondary/sidebar",
+                |theme| theme.secondary,
+                |theme| theme.sidebar,
+                4.5,
+            ),
+            ("muted/chat", |theme| theme.muted, |theme| theme.chat, 4.5),
+            (
+                "faint/sidebar",
+                |theme| theme.faint,
+                |theme| theme.sidebar,
+                2.5,
+            ),
+            (
+                "on_accent/accent",
+                |theme| theme.on_accent,
+                |theme| theme.accent,
+                4.5,
+            ),
+            (
+                "on_danger/danger",
+                |theme| theme.on_danger,
+                |theme| theme.danger,
+                4.5,
+            ),
+        ];
+        // The palette's own muted ink; raised in a later pass. Secondary and
+        // muted are the theme's identity, so a palette that doesn't reach
+        // 4.5:1 keeps the ratio it has instead of being darkened here.
+        let palette_own = [
+            ("rose-pine-dawn", "secondary/sidebar", 3.6),
+            ("rose-pine-dawn", "muted/chat", 3.3),
+            ("catppuccin-latte", "muted/chat", 3.4),
+            ("sakura", "muted/chat", 3.8),
+            ("tokyo-night", "muted/chat", 4.0),
+        ];
+        for built_in in &BUILT_IN {
+            for (pair, ink, ground, least) in pairs {
+                let least = palette_own
+                    .iter()
+                    .find(|(id, own, _)| *id == built_in.id && *own == pair)
+                    .map_or(least, |&(_, _, ratio)| ratio);
+                let ratio = contrast(ink(&built_in.theme), ground(&built_in.theme));
+                assert!(
+                    ratio >= least,
+                    "{}'s {pair} is {ratio:.2}:1, under {least}:1",
+                    built_in.name
+                );
+            }
+        }
     }
 }

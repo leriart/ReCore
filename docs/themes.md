@@ -454,6 +454,12 @@ and a card.
 | Rosé Pine Dawn | `rose-pine-dawn` | no | rose | [Rosé Pine](https://rosepinetheme.com/palette/) |
 | Sakura | `sakura` | no | blossom pink | Yapfast's own |
 
+The contrast test in `crates/recore-core/src/theme.rs` holds each palette to
+what the mapping below promises: 4.5:1 for text, secondary, muted, on-accent
+and on-danger, and 2.5:1 for faint. `on_accent` and `on_danger` take the
+darkest or lightest ink that reads on the accent or red; a palette's own
+secondary or muted ink may stay under 4.5:1 until its ramp is reworked.
+
 The palettes of Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night and Rosé Pine
 are published under the MIT licence; thanks to their authors. For Tokyo
 Night, the steps between its grounds and text (bg_highlight, fg_gutter, dark3,
@@ -469,8 +475,9 @@ colours, not their names for UI parts, so each mapping is ReCore's:
 - Text, secondary, muted and faint take the palette's text ramp; faint keeps
   at least 2.5:1 against the sidebar.
 - Content on the accent and on red (on-accent, on-danger) takes the palette's
-  darkest or lightest colour, whichever reads; on pastel accents, as in
-  Catppuccin and Tokyo Night, that's dark.
+  darkest or lightest colour, whichever reads, and black or white when its
+  ramp stops short; on pastel accents, as in Catppuccin and Tokyo Night,
+  that's dark.
 - Light themes wash hovers with a dark overlay (black, or the palette's text
   colour) instead of white, sweep skeletons with a white band, and draw the
   tooltip light, since its text is the theme's text colour.
