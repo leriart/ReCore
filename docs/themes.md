@@ -149,8 +149,12 @@ theme carries:
 - Its own variable chain: `var()`, fallbacks, `!important`, `@import` between
   local files, `@media`, `.theme-dark` and `.theme-light` blocks,
   `color-mix()` (two or more colours, in sRGB, linear light, Lab, LCh,
-  OKLab or OKLCh), `light-dark()`, `hwb()`, `oklab()` and `oklch()`, `lab()`,
-  `lch()` and `color(srgb ...)`/`color(display-p3 ...)`. Hex, `rgb()`,
+  OKLab, OKLCh or any of the `color()` spaces below, along the shorter,
+  longer, increasing or decreasing hue arc), `light-dark()`, `hwb()`,
+  `oklab()` and `oklch()`, `lab()`, `lch()`, and `color()` with `srgb`,
+  `srgb-linear`, `display-p3`, `a98-rgb`, `prophoto-rgb`, `rec2020` and
+  `xyz`/`xyz-d50`/`xyz-d65`; a space CSS does not define is not a colour.
+  Hex, `rgb()`,
   `rgba()`, `hsl()`, `hsla()`, `contrast-color()` and named colours are read,
   and DiscordRecolor's bare `30,30,30` RGB triples are understood as colours.
   The relative forms (`rgb(from ...)`, `hsl(from ...)`, `oklab(from ...)`,
@@ -162,16 +166,26 @@ theme carries:
   The cascade keeps specificity, source order, `!important` and `@layer`
   order across the root, theme-class and media-query blocks, so a later
   `:root` declaration can win over an earlier `.theme-dark` one, as in a
-  browser. A `@layer reset, base, theme;` statement fixes the layer order
-  before its blocks, and `@import "x.css" layer(theme) screen` puts the
-  import in a layer and applies its media condition. `@supports` conditions
+  browser. Specificity is CSS's own triple: `:is()` and `:not()` take
+  their most specific argument, `:where()` takes none, and an attribute's
+  value does not count. A `@layer reset, base, theme;` statement fixes the
+  layer order before its blocks, and `@import "x.css" layer(theme) screen`
+  puts the import in a layer and applies its media condition. An
+  `!important` declaration reverses the layer order, so the first layer
+  wins and a rule outside any layer is the weakest of them, as CSS
+  Cascade 5 says. `@supports` conditions
   and the media/supports/layer conditions after an `@import` are applied:
   a declaration is supported when the engine reads it (or the reader
   reduces it to sRGB, as with `color-mix()`), so a theme's fallback takes
   the branch a browser would, and a feature the native window cannot paint
   — a `backdrop-filter`, a mask, a container type or a view transition —
   takes its `not (...)` branch instead. `@property` gives a variable its syntax and initial value, which
-  fills the variable when the theme does not set it. An at-rule ReCore does
+  fills the variable when the theme does not set it, and a value that does
+  not match the syntax is the guaranteed-invalid value a browser makes it,
+  rather than the text the theme wrote. CSS nesting is bounded: a sheet
+  holds at most 100 000 rules and one nested rule at most 32 selectors, so
+  a theme that nests until it would multiply without end is read as far as
+  the limit and says so. An at-rule ReCore does
   not read (`@starting-style`, `@page`, a future one) is kept in the file
   and its rules are not applied, as a browser does, and the note says
   which; a block whose closing brace is missing is read to the end of the
@@ -190,6 +204,10 @@ theme carries:
   `@container body style(--light-mode: on)`, which ReCore uses to choose the
   light appearance. A container size query uses the same reference window;
   names, `scroll-state()` and unknown conditions stay applicable.
+- A media query list is true when one of its queries is true, and its
+  appearance is the appearance of the query that is true, so
+  `@media (min-width: 2000px), (prefers-color-scheme: dark)` is false at
+  the reference window rather than dark.
 - Remote files: an `http:` or `https:` `@import` is downloaded, with its own
   relative imports; so are a remote font in `@font-face` and a remote
   picture in `--background-image`. Downloads are kept for ten minutes in

@@ -103,8 +103,9 @@ window; `rem` follows the page's `font-size`. `calc()`, `min()`, `max()`,
 and `env()` takes its fallback.
 
 Colours: `#rgb`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()`, `hsl()`/`hsla()`,
-`hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color(srgb ...)` and
-`color(display-p3 ...)`, `contrast-color()`, `light-dark()`, named colours,
+`hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in `srgb`,
+`srgb-linear`, `display-p3`, `a98-rgb`, `prophoto-rgb`, `rec2020` and the
+`xyz` family, `contrast-color()`, `light-dark()`, named colours,
 `transparent`, `currentColor`, and DiscordRecolor's bare `30,30,30` triples.
 
 Relative colours keep or replace channels: `rgb(from ...)`, `hsl(from ...)`,
@@ -112,14 +113,17 @@ Relative colours keep or replace channels: `rgb(from ...)`, `hsl(from ...)`,
 `oklch(from ...)`, `color(from ...)`, including `calc(...)` and the channel
 keywords inside them. `calc()`, `min()`, `max()`, `clamp()` and `abs()` work
 in colour channels; `var()` resolves with fallbacks; `color-mix()` mixes two
-or more colours in sRGB, sRGB-linear, HSL, HWB, Lab, LCh, OKLab and OKLCh.
-Gradients (`linear`, `radial`, `conic`) and the usual length and angle units
-are understood.
+or more colours in sRGB, sRGB-linear, HSL, HWB, Lab, LCh, OKLab, OKLCh and
+the `color()` spaces, along the shorter, longer, increasing or decreasing
+hue arc. Gradients (`linear`, `radial`, `conic`, and the repeating forms)
+read their stops' colours, percentages, lengths and — along a conic sweep —
+angles, and a stop with two positions is a hard edge.
 
 ### Cascade
 
-Specificity, source order, `!important` and `@layer` order across the root,
-theme-class and media blocks; inheritance; custom properties with `var()`
+CSS's own specificity triple, source order, `!important` and `@layer` order
+— including the reversal an `!important` declaration makes — across the
+root, theme-class and media blocks; inheritance; custom properties with `var()`
 resolution; CSS nesting (`&`, nested `@media`/`@container`) flattened before
 the cascade. The cascade is settled by `style-engine` against ReCore's
 synthetic region tree (sidebar, chat, member list, composer, settings, menus,
