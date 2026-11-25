@@ -86,7 +86,7 @@ pub(crate) fn compute(sheet: &Stylesheet, vars: &css::Vars, dark: bool) -> Optio
         ..MediaEnv::default()
     };
     let (mut tree, ids) = build_tree(vars, dark, &used, &active, &states);
-    let styles = compute_styles(&tree, &ids, &engine_sheet, &environment, &active, &states);
+    let styles = compute_styles(&tree, &ids, &engine_sheet, &environment, &active);
     let pseudos = pseudo_styles(
         &mut tree,
         &ids,
@@ -386,12 +386,39 @@ fn active_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
             }
         }
     }
+    include_ancestors(&mut roles);
     roles
 }
 
-/// The roles a theme styles under a pointer or focus state.
-fn state_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
-    let mut roles = BTreeSet::new();
+/// Adds the region a role hangs from to `roles`, all the way to the page.
+///
+/// A region's node must sit under its real parent, not under the page: a
+/// theme's `.chat… .message…` rule, or a `color` the message list inherits,
+/// depends on the ancestors being there even when no selector names them.
+fn include_ancestors(roles: &mut BTreeSet<Role>) {
+    for node in &NODES {
+        if !roles.contains(&node.role) {
+            continue;
+        }
+        let mut parent = node.parent;
+        while let Some(at) = parent {
+            if NODES[at].role != Role::Root {
+                roles.insert(NODES[at].role);
+            }
+            parent = NODES[at].parent;
+        }
+    }
+}
+
+/// The regions a theme styles under the pointer or the keyboard's focus.
+#[derive(Default)]
+struct States {
+    hover: BTreeSet<Role>,
+    focus: BTreeSet<Role>,
+}
+
+fn state_roles(sheet: &Stylesheet, dark: bool) -> States {
+    let mut states = States::default();
     for rule in &sheet.rules {
         if rule
             .color_scheme
@@ -401,11 +428,32 @@ fn state_roles(sheet: &Stylesheet, dark: bool) -> BTreeSet<Role> {
         }
         for selector in &rule.selectors {
             if let Some(role) = native::state_role(selector, dark) {
-                roles.insert(role);
+                let lower = selector.to_ascii_lowercase();
+                if lower.contains(":hover") || lower.contains(":active") {
+                    states.hover.insert(role);
+                }
+                if lower.contains(":focus") {
+                    states.focus.insert(role);
+                }
             }
         }
     }
-    roles
+    states
+}
+
+/// The nearest ancestor of `index` the window builds, or `None` for the page.
+fn active_parent(index: usize, active: &BTreeSet<Role>) -> Option<usize> {
+    let mut parent = NODES[index].parent;
+    while let Some(at) = parent {
+        if NODES[at].role == Role::Root {
+            return None;
+        }
+        if active.contains(&NODES[at].role) {
+            return Some(at);
+        }
+        parent = NODES[at].parent;
+    }
+    None
 }
 
 /// The custom properties the semantic layer reads: the ones a declaration
@@ -594,7 +642,7 @@ fn build_tree(
     dark: bool,
     used: &BTreeSet<String>,
     active: &BTreeSet<Role>,
-    states: &BTreeSet<Role>,
+    states: &States,
 ) -> (StyleTree, BTreeMap<Key, NodeId>) {
     let mut tree = StyleTree::new();
     let super_root = tree.root();
@@ -616,18 +664,13 @@ fn build_tree(
     let body = node("body", &root_classes, NODES[0].id, None, dark);
     let body_id = tree.insert_child(html_id, body);
     ids.insert(Key::Body, body_id);
-    for node_spec in NODES
-        .iter()
-        .filter(|node| node.role != Role::Root && active.contains(&node.role))
-    {
-        let parent = match node_spec.parent {
-            Some(index)
-                if NODES[index].role != Role::Root && active.contains(&NODES[index].role) =>
-            {
-                ids[&Key::Region(NODES[index].role)]
-            }
-            _ => body_id,
-        };
+    for (index, node_spec) in NODES.iter().enumerate() {
+        if node_spec.role == Role::Root || !active.contains(&node_spec.role) {
+            continue;
+        }
+        let parent = active_parent(index, active)
+            .map(|at| ids[&Key::Region(NODES[at].role)])
+            .unwrap_or(body_id);
         let tag = node_spec.tags.first().copied().unwrap_or("div");
         let normal = node(
             tag,
@@ -638,7 +681,7 @@ fn build_tree(
         );
         let id = tree.insert_child(parent, normal);
         ids.insert(Key::Region(node_spec.role), id);
-        if states.contains(&node_spec.role) {
+        if states.hover.contains(&node_spec.role) {
             let mut hover = node(
                 tag,
                 node_spec.classes,
@@ -649,6 +692,8 @@ fn build_tree(
             hover.state = NodeState::HOVER | NodeState::ACTIVE;
             let hover_id = tree.insert_child(parent, hover);
             ids.insert(Key::Hover(node_spec.role), hover_id);
+        }
+        if states.focus.contains(&node_spec.role) {
             let mut focus = node(
                 tag,
                 node_spec.classes,
@@ -685,25 +730,19 @@ fn compute_styles(
     sheet: &style_engine::css::stylesheet::Stylesheet,
     environment: &MediaEnv,
     active: &BTreeSet<Role>,
-    states: &BTreeSet<Role>,
 ) -> BTreeMap<Key, ComputedStyle> {
     let mut styles = BTreeMap::new();
     let html = compute_node(tree, ids[&Key::Html], sheet, environment, None);
     let body = compute_node(tree, ids[&Key::Body], sheet, environment, Some(&html));
     styles.insert(Key::Html, html);
     styles.insert(Key::Body, body);
-    for node in NODES
-        .iter()
-        .filter(|node| node.role != Role::Root && active.contains(&node.role))
-    {
-        let parent_key = match node.parent {
-            Some(index)
-                if NODES[index].role != Role::Root && active.contains(&NODES[index].role) =>
-            {
-                Key::Region(NODES[index].role)
-            }
-            _ => Key::Body,
-        };
+    for (index, node) in NODES.iter().enumerate() {
+        if node.role == Role::Root || !active.contains(&node.role) {
+            continue;
+        }
+        let parent_key = active_parent(index, active)
+            .map(|at| Key::Region(NODES[at].role))
+            .unwrap_or(Key::Body);
         let parent = styles.get(&parent_key);
         let region = compute_node(
             tree,
@@ -712,24 +751,12 @@ fn compute_styles(
             environment,
             parent,
         );
-        let hover = states.contains(&node.role).then(|| {
-            compute_node(
-                tree,
-                ids[&Key::Hover(node.role)],
-                sheet,
-                environment,
-                parent,
-            )
-        });
-        let focus = states.contains(&node.role).then(|| {
-            compute_node(
-                tree,
-                ids[&Key::Focus(node.role)],
-                sheet,
-                environment,
-                parent,
-            )
-        });
+        let hover = ids
+            .get(&Key::Hover(node.role))
+            .map(|id| compute_node(tree, *id, sheet, environment, parent));
+        let focus = ids
+            .get(&Key::Focus(node.role))
+            .map(|id| compute_node(tree, *id, sheet, environment, parent));
         if node.role == Role::Message {
             let nested = compute_node(
                 tree,

@@ -2480,6 +2480,48 @@ mod tests {
     }
 
     #[test]
+    fn a_descendant_rule_reaches_a_row_through_its_ancestors() {
+        // `docs/themes.md`'s own example: the message list sits under the
+        // chat, and the chat's node has to be there for the selector to
+        // match even though no rule names the list itself.
+        let theme = dark(
+            r#"
+            [class*="chat_"] [class*="message_"] { background: #ff0000; }
+            "#,
+        );
+        assert_eq!(theme.native.row_hover, Some(Rgba::rgb(0xff, 0, 0)));
+
+        // And a `color` on the chat is what a message inherits.
+        let theme = dark(
+            r#"
+            [class*="chat_"] { color: #ff0000; }
+            [class*="message_"] { background: currentColor; }
+            "#,
+        );
+        assert_eq!(theme.native.row_hover, Some(Rgba::rgb(0xff, 0, 0)));
+    }
+
+    #[test]
+    fn a_focus_rule_reaches_the_window() {
+        let theme = dark(
+            r#"
+            [class*="channelTextArea_"]:focus { background: #ff0000; }
+            "#,
+        );
+        assert_eq!(theme.native.hover, Some(Rgba::rgb(0xff, 0, 0)));
+
+        // A hover rule still wins over the focus one, as one surface can only
+        // show one state.
+        let theme = dark(
+            r#"
+            [class*="channelTextArea_"]:focus { background: #ff0000; }
+            [class*="channelTextArea_"]:hover { background: #0000ff; }
+            "#,
+        );
+        assert_eq!(theme.native.hover, Some(Rgba::rgb(0, 0, 0xff)));
+    }
+
+    #[test]
     fn a_box_shadow_keeps_its_offset_blur_and_colour() {
         let theme = dark(
             r#"
