@@ -443,7 +443,7 @@ impl Settings {
                         continue;
                     }
                     let value = value.replace(['\n', '\r'], " ").trim().to_owned();
-                    let _ = writeln!(text, "  {option}: {value};");
+                    writeln!(text, "  {option}: {value};").expect("a String writes");
                 }
                 text.push_str(
                     "}
@@ -875,7 +875,7 @@ impl Settings {
         }
         cx.themes.reload();
         if let Some(target) = last.as_ref()
-            && let Some(id) = css_id_at(&cx.themes, target)
+            && let Some(id) = css_id_at(cx.themes, target)
         {
             choose(cx, &id);
         }
@@ -935,7 +935,7 @@ impl Settings {
             return;
         }
         cx.themes.reload();
-        match css_id_at(&cx.themes, &path) {
+        match css_id_at(cx.themes, &path) {
             Some(id) => self.edit_css_theme(cx, &id),
             None => {
                 let mut editor = editor;
@@ -1974,7 +1974,7 @@ impl<'a> Page<'a> {
                     .strip_suffix(unit.as_str())
                     .and_then(|number| number.trim().parse::<i32>().ok())
                     .unwrap_or(*value);
-                let slider_unit = unit.clone();
+                let slider_unit = unit;
                 let slider_name = name.clone();
                 let apply_name = name.clone();
                 slider(
@@ -2134,7 +2134,7 @@ impl<'a> Page<'a> {
                     theme,
                     "Reset this option",
                     Kind::Plain,
-                    Some(theme_message(Event::CssResetOne(name.clone()))),
+                    Some(theme_message(Event::CssResetOne(name))),
                 )
                 .small(),
             );
@@ -2682,14 +2682,16 @@ fn css_note(themes: &crate::themes::Themes) -> String {
         )
     };
     if !themes.problems.is_empty() {
-        let _ = write!(
+        write!(
             note,
             " {} file{} could not be read.",
             themes.problems.len(),
             if themes.problems.len() == 1 { "" } else { "s" }
-        );
+        )
+        .expect("a String writes");
         for problem in themes.problems.iter().take(2) {
-            let _ = write!(note, " {}: {}.", problem.path.display(), problem.message);
+            write!(note, " {}: {}.", problem.path.display(), problem.message)
+                .expect("a String writes");
         }
     }
     if let Some(css) = themes.chosen_css() {
@@ -2701,7 +2703,8 @@ fn css_note(themes: &crate::themes::Themes) -> String {
             }
         }
         if css.warnings.len() > 3 {
-            let _ = write!(note, " And {} more warnings.", css.warnings.len() - 3);
+            write!(note, " And {} more warnings.", css.warnings.len() - 3)
+                .expect("a String writes");
         }
     }
     note

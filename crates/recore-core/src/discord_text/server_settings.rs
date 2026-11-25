@@ -445,12 +445,12 @@ async fn settings_action(
                 }
                 AutoModAction::Create(form) => {
                     let mut actions = vec![serde_json::json!({"type": 1})];
-                    if form.alert {
-                        if let Some(channel) = form.alert_channel {
-                            actions.push(serde_json::json!({
-                                "type": 2, "metadata": {"channel_id": channel}
-                            }));
-                        }
+                    if form.alert
+                        && let Some(channel) = form.alert_channel
+                    {
+                        actions.push(serde_json::json!({
+                            "type": 2, "metadata": {"channel_id": channel}
+                        }));
                     }
                     if form.timeout {
                         actions.push(serde_json::json!({

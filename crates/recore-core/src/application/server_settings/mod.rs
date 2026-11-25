@@ -569,7 +569,7 @@ impl Application {
     }
 
     /// Something done on one of the pages that act at once.
-    pub(super) fn settings_action_input(&mut self, action: ServerSettingsAction) -> Vec<Effect> {
+    pub(super) fn settings_action_input(&self, action: ServerSettingsAction) -> Vec<Effect> {
         match action {
             ServerSettingsAction::Soundboard(_)
             | ServerSettingsAction::Webhooks(_)

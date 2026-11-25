@@ -1062,6 +1062,10 @@ impl OpenChannel {
 
     /// Who reacted to `item` with `key`: a page of them, as
     /// [`Event::Reactors`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the page's fields, as Discord's reactors endpoint takes them"
+    )]
     pub fn reactors(
         &self,
         discord: &Discord,

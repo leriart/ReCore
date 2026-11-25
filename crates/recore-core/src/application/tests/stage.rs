@@ -147,7 +147,7 @@ fn asking_to_speak_is_a_stage_command() {
     });
     // A failure says why where the call's errors show.
     app.apply(Event::SpeakRequested {
-        room: room.clone(),
+        room,
         requested: true,
         result: Err("Discord said no".into()),
     });

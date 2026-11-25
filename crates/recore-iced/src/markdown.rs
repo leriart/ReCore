@@ -544,9 +544,7 @@ fn code_runs(text: &str, language: Option<&str>) -> Vec<Run> {
                 end += next.len_utf8();
                 if next == '\\' {
                     end += text[end..].chars().next().map_or(0, char::len_utf8);
-                } else if next == quote {
-                    break;
-                } else if next == '\n' && quote != '`' {
+                } else if next == quote || (next == '\n' && quote != '`') {
                     break;
                 }
             }

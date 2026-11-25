@@ -166,10 +166,12 @@ impl Client {
     fn update_attachment_privacy(&self) {
         if let Some(backend) = &self.backend {
             let (strip_image_metadata, anonymize_names) = self.attachment_privacy;
-            let _ = backend.send(Command::Discord(DiscordCommand::AttachmentPrivacy {
-                strip_image_metadata,
-                anonymize_names,
-            }));
+            drop(
+                backend.send(Command::Discord(DiscordCommand::AttachmentPrivacy {
+                    strip_image_metadata,
+                    anonymize_names,
+                })),
+            );
         }
     }
 
@@ -207,7 +209,7 @@ impl Client {
                 }
                 Effect::DiscordMfaCode(code) => {
                     if let Some(codes) = &self.link_codes {
-                        let _ = codes.send(code);
+                        drop(codes.send(code));
                     }
                 }
                 Effect::StopDiscordLink => {

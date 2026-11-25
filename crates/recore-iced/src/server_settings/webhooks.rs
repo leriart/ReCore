@@ -58,7 +58,7 @@ impl<'a> View<'a> {
             under.push(kind.into());
             let url = WebhooksPage::address(webhook);
             let mut buttons = row![].spacing(form::TIGHT);
-            if let Some(url) = url.clone() {
+            if let Some(url) = url {
                 buttons = buttons.push(action(
                     theme,
                     "Copy URL",

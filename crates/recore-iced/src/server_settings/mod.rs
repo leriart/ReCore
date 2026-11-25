@@ -484,7 +484,7 @@ impl<'a> View<'a> {
             Some(SettingsPage::Emoji(page)) => dialogs.extend(self.emoji_dialog(page)),
             Some(SettingsPage::Stickers(page)) => dialogs.extend(self.sticker_dialog(core, page)),
             Some(SettingsPage::Soundboard(page)) => {
-                dialogs.extend(self.soundboard_dialog(page, screen))
+                dialogs.extend(self.soundboard_dialog(page, screen));
             }
             Some(SettingsPage::Webhooks(page)) => dialogs.extend(self.webhook_dialog(page, screen)),
             Some(SettingsPage::AutoMod(page)) => dialogs.extend(self.automod_dialog(page, screen)),

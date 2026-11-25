@@ -678,7 +678,7 @@ fn edits_a_group_dms_name_and_icon_from_its_menu() {
     assert!(app.state.group_dialog.is_none());
 
     // Removing the icon sends a clear, not a keep.
-    app.dispatch(Action::OpenGroupEditor(group.clone()));
+    app.dispatch(Action::OpenGroupEditor(group));
     app.dispatch(Action::ResetGroupIcon);
     let effects = app.dispatch(Action::SaveGroup);
     assert!(matches!(

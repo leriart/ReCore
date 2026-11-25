@@ -386,7 +386,7 @@ mod tests {
                 green = g * (1.0 - grade.sepia) + (r * 0.349 + g * 0.686 + b * 0.168) * grade.sepia;
                 blue = b * (1.0 - grade.sepia) + (r * 0.272 + g * 0.534 + b * 0.131) * grade.sepia;
             }
-            let scan = if grade.scanline > 0.0 && (index / width) % 3 == 0 {
+            let scan = if grade.scanline > 0.0 && (index / width).is_multiple_of(3) {
                 1.0 - grade.scanline
             } else {
                 1.0

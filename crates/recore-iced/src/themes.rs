@@ -630,7 +630,7 @@ impl Themes {
     }
 
     pub fn set_font(&mut self, root: &Path, name: &str) {
-        self.recore.font = name.to_owned();
+        name.clone_into(&mut self.recore.font);
         self.recore.font_chosen = true;
         layout::store(root, "recore_font", name.to_owned());
         let chosen = self.chosen_id().to_owned();
@@ -787,7 +787,7 @@ impl Themes {
                 self.recore
                     .background
                     .as_deref()
-                    .and_then(|path| load_picture_file(path)),
+                    .and_then(load_picture_file),
             );
             self.background_dim = self.recore.background_dim;
             return;
@@ -1097,7 +1097,7 @@ pub fn clear_remote_cache() {
     if let Ok(dir) = remote_cache_dir().lock()
         && let Some(dir) = dir.as_ref()
     {
-        let _ = fs::remove_dir_all(dir);
+        drop(fs::remove_dir_all(dir));
     }
 }
 
@@ -1111,11 +1111,10 @@ fn fetch_remote(url: &str) -> Option<Vec<u8>> {
     }
     if let Ok(mut cache) = remote_cache().lock()
         && let Some((at, bytes)) = cache.get_mut(url)
+        && at.elapsed() < REMOTE_TTL
     {
-        if at.elapsed() < REMOTE_TTL {
-            *at = std::time::Instant::now();
-            return Some(bytes.clone());
-        }
+        *at = std::time::Instant::now();
+        return Some(bytes.clone());
     }
     let disk = disk_cache_read(url);
     let fallback = if disk.is_some() {
@@ -1135,7 +1134,7 @@ fn fetch_remote(url: &str) -> Option<Vec<u8>> {
     let fetched = std::thread::Builder::new()
         .name("recore-theme-fetch".into())
         .spawn(move || {
-            let _ = recore_core::init_tls();
+            drop(recore_core::init_tls());
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .user_agent(concat!("ReCore/", env!("CARGO_PKG_VERSION")))
@@ -1228,7 +1227,8 @@ pub fn import_theme(folder: &Path, url: &str) -> Result<PathBuf, String> {
         })
         .collect();
     if name.is_empty() || name == "-" {
-        name = "imported.theme.css".to_owned();
+        name.clear();
+        name.push_str("imported.theme.css");
     } else if !name.to_ascii_lowercase().ends_with(".css") {
         name.push_str(".theme.css");
     }
@@ -1265,7 +1265,7 @@ fn disk_cache_read(url: &str) -> Option<Vec<u8>> {
     let path = disk_cache_path(url)?;
     let meta = fs::metadata(&path).ok()?;
     if meta.len() > REMOTE_LIMIT as u64 {
-        let _ = fs::remove_file(&path);
+        drop(fs::remove_file(&path));
         return None;
     }
     if meta
@@ -1305,7 +1305,7 @@ fn disk_cache_write(url: &str, bytes: &[u8]) {
     }
     let temporary = path.with_extension("part");
     if fs::write(&temporary, bytes).is_ok() {
-        let _ = fs::rename(&temporary, &path);
+        drop(fs::rename(&temporary, &path));
     }
     // Keep the folder from growing without limit when someone cycles through
     // many remote bases.
@@ -1318,7 +1318,7 @@ fn disk_cache_write(url: &str, bytes: &[u8]) {
         if files.len() > 128 {
             files.sort_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
             for old in files.iter().take(files.len() - 128) {
-                let _ = fs::remove_file(old);
+                drop(fs::remove_file(old));
             }
         }
     }
@@ -1337,7 +1337,7 @@ fn recore_family(name: &str) -> Option<&'static str> {
 /// own client folders. A later file with the same id keeps its own id.
 fn theme_folders(root: &Path) -> Vec<PathBuf> {
     let own = root.join("themes");
-    let _ = std::fs::create_dir_all(&own);
+    drop(std::fs::create_dir_all(&own));
     let mut folders = Vec::new();
     let mut seen = BTreeSet::new();
     // Themes the packages carry. Windows keeps them beside recore.exe, the
@@ -1666,7 +1666,7 @@ pub fn open_folder(path: &Path) {
     let opener = "open";
     #[cfg(windows)]
     let opener = "explorer";
-    let _ = std::process::Command::new(opener).arg(path).spawn();
+    drop(std::process::Command::new(opener).arg(path).spawn());
 }
 
 #[cfg(test)]

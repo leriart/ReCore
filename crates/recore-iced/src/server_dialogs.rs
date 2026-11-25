@@ -325,7 +325,7 @@ impl Dialogs {
             Event::CloseChannel => Action::CloseChannelDialog,
             Event::GroupName(name) => {
                 if let Some(group) = &mut local.group {
-                    *group = name.clone();
+                    group.clone_from(&name);
                 }
                 Action::GroupName(name)
             }
@@ -534,8 +534,7 @@ impl<'a> View<'a> {
             form::note(
                 theme,
                 "This server asks a few questions before you can talk. Answer them to finish joining.",
-            )
-            .into(),
+            ),
         ];
         if form.loading {
             body.push(
@@ -546,7 +545,7 @@ impl<'a> View<'a> {
             );
         }
         for (index, question) in form.fields.iter().enumerate() {
-            body.push(form::heading(theme, question.label.as_str()).into());
+            body.push(form::heading(theme, question.label.as_str()));
             if !question.description.is_empty() {
                 body.push(
                     text(question.description.as_str())
@@ -629,7 +628,7 @@ impl<'a> View<'a> {
             }
         }
         if let Some(error) = &form.error {
-            body.push(form::note_in(error.as_str(), theme.danger).into());
+            body.push(form::note_in(error.as_str(), theme.danger));
         }
         body.push(
             row![
@@ -669,8 +668,7 @@ impl<'a> View<'a> {
             form::note(
                 theme,
                 "Tell this server a little about yourself. Your answers are saved to your account.",
-            )
-            .into(),
+            ),
         ];
         for (index, prompt) in form.prompts.iter().enumerate() {
             let title = if prompt.required {
@@ -678,7 +676,7 @@ impl<'a> View<'a> {
             } else {
                 prompt.title.clone()
             };
-            body.push(form::heading(theme, title).into());
+            body.push(form::heading(theme, title));
             for (choice, option) in prompt.options.iter().enumerate() {
                 let chosen = prompt.chosen(&option.id);
                 let (ground, ink, detail) = if chosen {
@@ -715,7 +713,7 @@ impl<'a> View<'a> {
             }
         }
         if let Some(error) = &form.error {
-            body.push(form::note_in(error.as_str(), theme.danger).into());
+            body.push(form::note_in(error.as_str(), theme.danger));
         }
         let required = form.prompts.iter().any(|prompt| prompt.required);
         let mut buttons = row![

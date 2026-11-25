@@ -26,6 +26,12 @@
 // A task dropped is work that never runs (a sync's pictures, a scroll):
 // every task goes back to the runtime.
 #![cfg_attr(not(test), warn(clippy::let_underscore_must_use))]
+// Sample frames are read in fixed-size steps, and `chunks_exact` names the
+// step at the read, next to the samples it gives.
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "a sample frame's width reads clearest where the chunk is taken"
+)]
 
 mod account;
 mod active_now;

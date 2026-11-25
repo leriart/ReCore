@@ -3,6 +3,12 @@
 // Opened from Explorer, ReCore opens no console window beside its own; see
 // `has_console`.
 #![cfg_attr(all(windows, feature = "desktop"), windows_subsystem = "windows")]
+// Sample frames are read in fixed-size steps, and `chunks_exact` names the
+// step at the read, next to the samples it gives.
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "a sample frame's width reads clearest where the chunk is taken"
+)]
 
 #[cfg(feature = "desktop")]
 mod autostart;

@@ -4774,10 +4774,8 @@ impl Application {
             }
             Event::SavedChanged { item, save, result } => match result {
                 Ok(()) => {
-                    if !save {
-                        if let Some(saved) = &mut self.state.saved_messages {
-                            saved.retain(|one| one.item != item);
-                        }
+                    if !save && let Some(saved) = &mut self.state.saved_messages {
+                        saved.retain(|one| one.item != item);
                     }
                 }
                 Err(_) => {

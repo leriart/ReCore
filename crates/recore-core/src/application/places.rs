@@ -500,6 +500,10 @@ impl Application {
 
     /// A Discord thread's joined, archived and locked state, and whether
     /// this account started it, by its room id.
+    #[allow(
+        clippy::needless_return,
+        reason = "each cfg block is the whole body, so only one exists in a build"
+    )]
     pub(super) fn thread_details(&self, room: &str) -> Option<(bool, bool, bool, bool)> {
         #[cfg(feature = "discord")]
         {
@@ -1128,7 +1132,7 @@ impl Application {
     /// Opens the dialog that sets a voice channel's status, as its menu's
     /// Set Status does.
     /// Sets a stage channel's topic, which STAGE_INSTANCE_UPDATE shows.
-    pub(super) fn set_stage_topic(&mut self, room: String, topic: String) -> Vec<Effect> {
+    pub(super) fn set_stage_topic(&self, room: String, topic: String) -> Vec<Effect> {
         let topic = topic.trim().to_owned();
         let stage = self.state.rooms.iter().any(|known| {
             known.id == room && known.voice && known.mark.kind == chat::MarkKind::Stage

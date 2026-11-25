@@ -490,23 +490,6 @@ pub mod wayland {
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::image_extension;
-
-        #[test]
-        fn a_picture_address_names_its_type() {
-            assert_eq!(
-                image_extension("https://cdn.example/a.PNG?size=2"),
-                Some("png")
-            );
-            assert_eq!(image_extension("https://cdn.example/a.jpeg#x"), Some("jpg"));
-            assert_eq!(image_extension("https://cdn.example/a.gif"), Some("gif"));
-            assert_eq!(image_extension("https://cdn.example/a.webp"), Some("webp"));
-            assert_eq!(image_extension("https://cdn.example/a.html"), None);
-        }
-    }
-
     impl Dispatch<WlDataOffer, Offered> for State {
         fn event(
             _: &mut Self,
@@ -552,6 +535,23 @@ pub mod wayland {
             _: &Connection,
             _: &QueueHandle<Self>,
         ) {
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::image_extension;
+
+        #[test]
+        fn a_picture_address_names_its_type() {
+            assert_eq!(
+                image_extension("https://cdn.example/a.PNG?size=2"),
+                Some("png")
+            );
+            assert_eq!(image_extension("https://cdn.example/a.jpeg#x"), Some("jpg"));
+            assert_eq!(image_extension("https://cdn.example/a.gif"), Some("gif"));
+            assert_eq!(image_extension("https://cdn.example/a.webp"), Some("webp"));
+            assert_eq!(image_extension("https://cdn.example/a.html"), None);
         }
     }
 }

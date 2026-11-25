@@ -702,11 +702,13 @@ fn interface_samples(set: SoundSet, sound: InterfaceSound) -> Vec<f32> {
 /// to back, the way the theme's WebAudio preview overlaps them; a stream
 /// that fails is reopened on the next sound, and a changed speaker swaps
 /// it.
-fn interface_player() -> &'static std::sync::mpsc::Sender<(Vec<f32>, Option<Arc<str>>)> {
+/// A sound for [`interface_player`]'s thread, and the speakers it wants.
+type InterfacePlay = (Vec<f32>, Option<Arc<str>>);
+
+fn interface_player() -> &'static std::sync::mpsc::Sender<InterfacePlay> {
     use std::sync::mpsc::{Receiver, Sender};
-    static SENDER: std::sync::OnceLock<Sender<(Vec<f32>, Option<Arc<str>>)>> =
-        std::sync::OnceLock::new();
-    fn run(receiver: Receiver<(Vec<f32>, Option<Arc<str>>)>) {
+    static SENDER: std::sync::OnceLock<Sender<InterfacePlay>> = std::sync::OnceLock::new();
+    fn run(receiver: Receiver<InterfacePlay>) {
         let mut stream: Option<(Option<Arc<str>>, Output<i16>)> = None;
         while let Ok((samples, speaker)) = receiver.recv() {
             let fresh = match &stream {
@@ -721,7 +723,7 @@ fn interface_player() -> &'static std::sync::mpsc::Sender<(Vec<f32>, Option<Arc<
                     2,
                     None,
                 ) {
-                    Ok(output) => Some((speaker.clone(), output)),
+                    Ok(output) => Some((speaker, output)),
                     Err(error) => {
                         tracing::warn!(
                             error = format!("{error:#}"),

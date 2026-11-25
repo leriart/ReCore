@@ -429,6 +429,10 @@ impl<'a> super::View<'a> {
 
     /// A row's face: lit while selected or pointed at, a press (unless a
     /// click is the row's `Drags`) and a right click on it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a row's face, press and both clicks travel together"
+    )]
     pub(super) fn row_face(
         self,
         id: String,

@@ -863,9 +863,7 @@ fn delivery_line<'a>(
 ) -> Option<Element<'a, Message>> {
     use crate::composer::Event;
     let theme = ctx.look.theme;
-    let Some((words, retry, cancel)) = delivery_controls(message) else {
-        return None;
-    };
+    let (words, retry, cancel) = delivery_controls(message)?;
     let failed = message.delivery == chat::Delivery::Failed;
     let mut line =
         row![

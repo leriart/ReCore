@@ -27,7 +27,7 @@ impl Application {
             return vec![];
         }
         let fallback = if removed.was_active {
-            removed.active.clone()
+            removed.active
         } else {
             None
         };

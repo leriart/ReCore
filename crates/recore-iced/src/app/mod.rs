@@ -593,7 +593,7 @@ impl App {
                                 problem.message
                             )
                         } else {
-                            let _ = std::fs::remove_file(&path);
+                            drop(std::fs::remove_file(&path));
                             "That theme is already present with the same content, so it was not added twice.".to_owned()
                         }
                     }

@@ -165,7 +165,7 @@ pub fn send_out(app: &mut App, text: String) -> Task<Message> {
     Task::batch([
         app.sync(),
         Task::perform(fetch(text, source, target), move |answer| {
-            Message::Translate(Event::SendDone(request, answer, original.clone()))
+            Message::Translate(Event::SendDone(request, answer, original))
         }),
     ])
 }
@@ -279,7 +279,7 @@ fn escaped(text: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
             out.push(char::from(byte));
         } else {
-            let _ = write!(out, "%{byte:02X}");
+            write!(out, "%{byte:02X}").expect("a String writes");
         }
     }
     out
