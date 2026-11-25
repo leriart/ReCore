@@ -1,0 +1,5 @@
+/* expect: native.raised_shadow=512,4,512,#ff0000 */
+/* A shadow's offsets and blur are held to the range the window draws. */
+[class*="menu_"] {
+  box-shadow: 1e9px 4px 1e9px #ff0000;
+}

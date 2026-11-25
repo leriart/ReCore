@@ -1,0 +1,5 @@
+/* expect: palette.chat=#102030 */
+/* --background-primary is Discord's chat ground. */
+:root {
+  --background-primary: #102030;
+}

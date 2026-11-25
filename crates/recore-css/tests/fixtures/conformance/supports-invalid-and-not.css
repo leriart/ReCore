@@ -1,0 +1,17 @@
+/* expect: native.sidebar=#101112 native.chat=#00ff00 */
+/* An invalid value makes the block false, so CSS applies its not() branch. */
+[class*="sidebarList_"] {
+  background: #101112;
+}
+
+@supports (display: nonsense) {
+  [class*="sidebarList_"] {
+    background: #ff0000;
+  }
+}
+
+@supports not (display: nonsense) {
+  [class*="chat_"] {
+    background: #00ff00;
+  }
+}

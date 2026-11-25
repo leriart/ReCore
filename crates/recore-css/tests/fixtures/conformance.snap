@@ -1,0 +1,20 @@
+attribute-and-class.css: native.sidebar=#112233 native.text=#445566 warnings=0
+color-mix-region.css: native.chat=#800080
+descendant-ancestor.css: native.row_hover=#223344
+font-face-data-uri.css: fonts=ProbeFace:400:false:16b look.font_family=ProbeFace
+has-guilds.css: native.chat=#102030
+hover-and-focus.css: native.hover=#334455 native.line=#556677
+import-subfolder.css: native.sidebar=#123456 native.chat=#00ff00 warnings=0
+keyframes-body.css: look.animations=wash:2s:inf:Normal:2f
+layer-order.css: native.sidebar=#ff0000
+media-range.css: native.sidebar=#111213 native.chat=#00ff00
+missing-import-keeps-theme.css: native.sidebar=#123456
+missing-semicolon.css: native.sidebar= native.secondary= native.radius=8
+root-radius-md.css: look.radius=18
+root-token-chat.css: palette.chat=#102030
+shadow-huge.css: native.raised_shadow=512,4,512,#ff0000
+supports-invalid-and-not.css: native.sidebar=#101112 native.chat=#00ff00
+symbols-and-comments.css: native.sidebar=#0f1e2d
+unclosed-block.css: native.sidebar=#abcdef warnings=1
+unknown-at-rule.css: native.sidebar=#121314 warnings=1
+var-in-region.css: native.sidebar=#0a0b0c

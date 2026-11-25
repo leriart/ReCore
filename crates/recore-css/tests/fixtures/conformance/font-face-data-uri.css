@@ -1,0 +1,10 @@
+/* expect: fonts=ProbeFace:400:false:16b look.font_family=ProbeFace */
+/* @font-face carries a data: URI, and --font-primary names it. */
+@font-face {
+  font-family: "ProbeFace";
+  src: url(data:font/ttf;base64,AAEAAAALAIAAAwAwT1MvMg==);
+}
+
+:root {
+  --font-primary: ProbeFace;
+}

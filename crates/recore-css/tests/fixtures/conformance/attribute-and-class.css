@@ -1,0 +1,9 @@
+/* expect: native.sidebar=#112233 native.text=#445566 warnings=0 */
+/* An attribute fragment and a hashed class both name a native region. */
+[class*="sidebarList_"] {
+  background: #112233;
+}
+
+.chat_2ZfjoI {
+  color: #445566;
+}

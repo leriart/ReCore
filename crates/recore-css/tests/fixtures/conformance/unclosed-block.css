@@ -1,0 +1,4 @@
+/* expect: native.sidebar=#abcdef warnings=1 */
+/* A rule whose closing brace is missing is read to the end of the file. */
+[class*="sidebarList_"] {
+  background: #abcdef;

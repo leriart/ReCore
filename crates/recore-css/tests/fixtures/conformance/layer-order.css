@@ -1,0 +1,15 @@
+/* expect: native.sidebar=#ff0000 */
+/* @layer a, b puts b above a, so b's first-written block still wins. */
+@layer a, b;
+
+@layer b {
+  [class*="sidebarList_"] {
+    background: #ff0000;
+  }
+}
+
+@layer a {
+  [class*="sidebarList_"] {
+    background: #0000ff;
+  }
+}

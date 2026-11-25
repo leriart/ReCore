@@ -1,0 +1,14 @@
+/* expect: look.animations=wash:2s:inf:Normal:2f */
+/* A body keyframes animation becomes the window's quiet moving ground. */
+@keyframes wash {
+  from {
+    background: #000000;
+  }
+  to {
+    background: #ffffff;
+  }
+}
+
+body {
+  animation: wash 2s linear infinite;
+}

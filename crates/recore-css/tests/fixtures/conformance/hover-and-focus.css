@@ -1,0 +1,9 @@
+/* expect: native.hover=#334455 native.line=#556677 */
+/* A hovered sidebar keeps its hover ground; a focused composer keeps its line. */
+[class*="sidebarList_"]:hover {
+  background: #334455;
+}
+
+[class*="channelTextArea_"]:focus {
+  border-color: #556677;
+}

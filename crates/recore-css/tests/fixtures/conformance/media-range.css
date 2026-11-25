@@ -1,0 +1,17 @@
+/* expect: native.sidebar=#111213 native.chat=#00ff00 */
+/* At 1280 px, `width <= 1000px` is false and the middle range is true. */
+[class*="sidebarList_"] {
+  background: #111213;
+}
+
+@media (width <= 1000px) {
+  [class*="sidebarList_"] {
+    background: #ff0000;
+  }
+}
+
+@media (1000px <= width <= 1400px) {
+  [class*="chat_"] {
+    background: #00ff00;
+  }
+}

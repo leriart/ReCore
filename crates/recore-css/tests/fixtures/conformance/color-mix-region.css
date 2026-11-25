@@ -1,0 +1,5 @@
+/* expect: native.chat=#800080 */
+/* color-mix() in a region is settled to sRGB before the window sees it. */
+[class*="chat_"] {
+  background: color-mix(in srgb, #ff0000 50%, #0000ff);
+}

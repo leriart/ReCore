@@ -1,0 +1,5 @@
+/* expect: native.chat=#102030 */
+/* :has() matches the root only when the guild rail sits under it. */
+.theme-dark:root:has(.guilds_) {
+  background: #102030;
+}

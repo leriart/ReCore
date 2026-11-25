@@ -1,0 +1,6 @@
+/* expect: native.sidebar= native.secondary= native.radius=8 */
+/* Without its `;`, the declaration swallows the next name and CSS drops it. */
+[class*="sidebarList_"] {
+  background: #224466 color: #aabbcc;
+  border-radius: 8px;
+}

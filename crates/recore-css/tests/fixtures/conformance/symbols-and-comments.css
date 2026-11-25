@@ -1,0 +1,6 @@
+/* expect: native.sidebar=#0f1e2d */
+/* } { ; " ☃ - braces in comments and strings do not end a rule. */
+[class*="sidebarList_"] {
+  background: #0f1e2d; /* } */
+  content: "☃;{}";
+}

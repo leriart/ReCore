@@ -1,0 +1,6 @@
+/* expect: native.sidebar=#0a0b0c */
+/* var() resolves from the custom property the region itself declares. */
+[class*="sidebarList_"] {
+  --ground: #0a0b0c;
+  background: var(--ground);
+}

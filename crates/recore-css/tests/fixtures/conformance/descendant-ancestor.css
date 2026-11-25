@@ -1,0 +1,5 @@
+/* expect: native.row_hover=#223344 */
+/* A message matched under the chat ancestor is the message row. */
+[class*="chat_"] [class*="message_"] {
+  background: #223344;
+}

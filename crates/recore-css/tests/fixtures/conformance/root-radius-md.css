@@ -1,0 +1,5 @@
+/* expect: look.radius=18 */
+/* --radius-md in px is the radius the window rounds its panels with. */
+:root {
+  --radius-md: 18px;
+}

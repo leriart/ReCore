@@ -1,0 +1,7 @@
+/* expect: native.sidebar=#123456 native.chat=#00ff00 warnings=0 */
+/* A local @import in a subfolder is read beside the theme. */
+@import "sub/imported.css";
+
+[class*="chat_"] {
+  background: #00ff00;
+}

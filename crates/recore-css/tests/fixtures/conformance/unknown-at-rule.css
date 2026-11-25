@@ -1,0 +1,11 @@
+/* expect: native.sidebar=#121314 warnings=1 */
+/* @starting-style is kept in the file, but CSS does not compute its rules. */
+[class*="sidebarList_"] {
+  background: #121314;
+}
+
+@starting-style {
+  [class*="sidebarList_"] {
+    background: #ff0000;
+  }
+}

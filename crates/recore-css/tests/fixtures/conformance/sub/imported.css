@@ -1,0 +1,4 @@
+/* A sheet in a subfolder, named by the fixture's @import. */
+[class*="sidebarList_"] {
+  background: #123456;
+}

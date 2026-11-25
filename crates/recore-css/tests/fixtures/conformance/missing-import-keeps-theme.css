@@ -1,0 +1,7 @@
+/* expect: native.sidebar=#123456 */
+/* A missing local import is left out and the rest of the theme is still read. */
+@import "gone.css";
+
+[class*="sidebarList_"] {
+  background: #123456;
+}
