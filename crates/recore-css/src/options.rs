@@ -3,9 +3,11 @@
 //! so a Vencord theme's `--background-primary` or ReCord's
 //! `--rl-scanline-opacity` both become a control with a readable label.
 
+use std::{borrow::Cow, collections::HashSet};
+
 use crate::{
     Rgba,
-    css::{MetaVar, Note, PropertySpec, Vars},
+    css::{MetaVar, Note, PropertySpec, Vars, find_ignore_case},
 };
 
 /// A control Appearance can show for one of a theme's custom properties.
@@ -119,6 +121,19 @@ pub fn detect_with_notes(
     notes: &std::collections::BTreeMap<String, Note>,
     properties: &std::collections::BTreeMap<String, PropertySpec>,
 ) -> Vec<ThemeOption> {
+    let mut warnings = Vec::new();
+    detect_reporting(vars, dark, notes, properties, &mut warnings)
+}
+
+/// [`detect_with_notes`], with a note for every value it could not offer,
+/// so a theme says why a property is missing instead of losing it quietly.
+pub fn detect_reporting(
+    vars: &Vars,
+    dark: bool,
+    notes: &std::collections::BTreeMap<String, Note>,
+    properties: &std::collections::BTreeMap<String, PropertySpec>,
+    warnings: &mut Vec<String>,
+) -> Vec<ThemeOption> {
     let mut options = Vec::new();
     for (name, raw) in vars.iter() {
         if !name.starts_with("--") || name.starts_with("--rl-asset-") {
@@ -127,7 +142,7 @@ pub fn detect_with_notes(
         // A data URI is a picture the theme carries, not something to type
         // into a field; offer its Clear button, but not the URI itself.
         if raw.len() > 2_000 {
-            if image_name(&name.to_ascii_lowercase()) {
+            if image_name(name) || holds(raw, "url(") {
                 let note = notes.get(name).cloned().unwrap_or_default();
                 let spec = properties.get(name);
                 let (label, group, description) = describe(name, &note);
@@ -138,7 +153,7 @@ pub fn detect_with_notes(
                     group,
                     kind: OptionKind::Image {
                         url: None,
-                        embedded: true,
+                        embedded: raw.contains("data:"),
                     },
                     value: String::new(),
                     default_value: spec
@@ -147,29 +162,38 @@ pub fn detect_with_notes(
                     recommended: true,
                     only_in: None,
                 });
+            } else {
+                warnings.push(format!(
+                    "the value of '{name}' is longer than 2000 bytes and is not offered as an option"
+                ));
             }
             continue;
         }
         let note = notes.get(name).cloned().unwrap_or_default();
         let spec = properties.get(name);
-        let Some(kind) = classify(vars, name, raw, dark, &note, spec) else {
+        // A `@property` rule is a contract: a value that does not match
+        // its syntax computes to the property's initial value.
+        let value: Cow<'_, str> = match spec.map(|spec| contract(vars, raw, spec)) {
+            Some(Contract::Initial(initial)) => Cow::Owned(initial),
+            Some(Contract::Invalid) => {
+                warnings.push(format!(
+                    "the value of '{name}' does not match the syntax its @property rule declares"
+                ));
+                Cow::Borrowed(raw)
+            }
+            _ => Cow::Borrowed(raw),
+        };
+        let Some(kind) = classify(vars, name, &value, dark, &note, spec) else {
             continue;
         };
         let (label, group, description) = describe(name, &note);
         // A colour's field and swatch show hex, not the `var()` or
         // `color-mix()` that produced it; the other value controls show the
         // value after its variables are filled in, so they can start from it.
+        let resolved = vars.resolve(value.as_ref()).map(|text| text.into_owned());
         let value = match &kind {
             OptionKind::Color { color } => color.hex(),
-            OptionKind::Percent { .. }
-            | OptionKind::Number { .. }
-            | OptionKind::Range { .. }
-            | OptionKind::Toggle { .. }
-            | OptionKind::Choice { .. } => vars
-                .resolve(raw)
-                .map(|value| value.into_owned())
-                .unwrap_or_else(|| raw.to_owned()),
-            _ => raw.to_owned(),
+            _ => resolved.unwrap_or_else(|| value.into_owned()),
         };
         let alias = raw.trim_start().starts_with("var(");
         let alias_name = name.ends_with("_v") || name.ends_with("-v");
@@ -201,18 +225,25 @@ pub fn detect_with_notes(
 /// Adds the options only the other appearance names, keeping the chosen
 /// appearance's value and kind for the names both have.
 pub fn merge(
-    mut options: Vec<ThemeOption>,
+    options: Vec<ThemeOption>,
     other: Vec<ThemeOption>,
     other_dark: bool,
 ) -> Vec<ThemeOption> {
+    // A theme can hold thousands of properties, so the names read so far
+    // are gathered once and looked up in one step; walking the options for
+    // every name of the other appearance costs a comparison per pair.
+    let mut merged = options;
+    let known: HashSet<&str> = merged.iter().map(|option| option.name.as_str()).collect();
+    let mut added = Vec::new();
     for mut option in other {
-        if !options.iter().any(|known| known.name == option.name) {
+        if !known.contains(option.name.as_str()) {
             option.only_in = Some(other_dark);
-            options.push(option);
+            added.push(option);
         }
     }
-    sort(&mut options);
-    options
+    merged.extend(added);
+    sort(&mut merged);
+    merged
 }
 
 fn sort(options: &mut [ThemeOption]) {
@@ -232,7 +263,11 @@ fn classify(
     note: &Note,
     spec: Option<&PropertySpec>,
 ) -> Option<OptionKind> {
-    let value = raw.trim();
+    // Every kind is read from the value the theme settles to, not from the
+    // text it writes, so a property that holds `var(--other)` is read as
+    // what it holds.
+    let resolved = vars.resolve(raw).unwrap_or(Cow::Borrowed(raw));
+    let value = resolved.trim();
     let lower = value.to_ascii_lowercase();
     let name_lower = name.to_ascii_lowercase();
 
@@ -243,21 +278,7 @@ fn classify(
         return Some(OptionKind::Choice { choices });
     }
     if name_lower.contains("flicker") || name_lower.contains("beam") {
-        let on = vars
-            .resolve(vars.get(name)?)?
-            .trim()
-            .trim_end_matches(['s', 'm'])
-            .parse::<f32>()
-            .is_ok_and(|value| value > 0.0);
-        return Some(OptionKind::Toggle {
-            on,
-            on_value: if name_lower.contains("flicker") {
-                "6s".into()
-            } else {
-                "0.5".into()
-            },
-            off_value: "0".into(),
-        });
+        return Some(flicker_toggle(value, name_lower.contains("flicker")));
     }
     if matches!(
         lower.as_str(),
@@ -293,13 +314,8 @@ fn classify(
             percent: true,
         });
     }
-    if image_name(&name_lower) {
-        let url = value.find("url(").and_then(|start| {
-            let rest = &value[start + 4..];
-            rest.find(')')
-                .map(|end| rest[..end].trim().trim_matches(['"', '\'']).to_owned())
-        });
-        if let Some(url) = url {
+    if image_name(name) {
+        if let Some(url) = picture_url(value) {
             return Some(OptionKind::Image {
                 embedded: url.starts_with("data:"),
                 url: Some(url),
@@ -312,7 +328,7 @@ fn classify(
             });
         }
     }
-    if let Some(color) = vars.color(name, !dark) {
+    if let Some(color) = crate::color::parse(value, !dark) {
         return Some(OptionKind::Color { color });
     }
     if font_name(&name_lower) {
@@ -323,45 +339,122 @@ fn classify(
         || name_lower.contains("dim")
         || name_lower.contains("alpha")
     {
-        return percent(vars, name).map(|(value, percent)| OptionKind::Percent { value, percent });
+        return percent(value, name).map(|(value, percent)| OptionKind::Percent { value, percent });
     }
-    if let Some((value, unit)) = number(vars, name) {
+    if let Some((value, unit)) = number(value) {
         return Some(OptionKind::Number { value, unit });
     }
     if let Some(spec) = spec
-        && let Some(kind) = property_kind(vars, name, dark, spec)
+        && let Some(kind) = property_kind(name, dark, spec, value)
     {
         return Some(kind);
     }
     Some(OptionKind::Text)
 }
 
-/// A kind `@property` gives a value that its CSS text did not reveal.
-fn property_kind(vars: &Vars, name: &str, dark: bool, spec: &PropertySpec) -> Option<OptionKind> {
-    let syntax = spec.syntax.as_deref()?.to_ascii_lowercase();
-    if syntax.contains("color") {
-        return vars
-            .color(name, !dark)
-            .map(|color| OptionKind::Color { color });
+/// What a `@property` rule settles on for the value a theme writes.
+enum Contract {
+    /// The value matches the syntax the rule declares.
+    Kept,
+    /// The value does not match, and the rule names the initial value it
+    /// falls back to.
+    Initial(String),
+    /// The value does not match, and the rule names no initial value.
+    Invalid,
+}
+
+/// What a `@property` rule makes of a value. CSS reads the syntax as a
+/// contract: a value that does not match it computes to the property's
+/// initial value, and a property with no initial value computes to the
+/// guaranteed-invalid one.
+fn contract(vars: &Vars, raw: &str, spec: &PropertySpec) -> Contract {
+    let Some(syntax) = spec.syntax.as_deref() else {
+        return Contract::Kept;
+    };
+    if syntax.trim() == "*" {
+        // Any value is fine; the rule says nothing about the value.
+        return Contract::Kept;
     }
-    if syntax.contains("percentage") {
-        return percent(vars, name).map(|(value, percent)| OptionKind::Percent { value, percent });
+    let value = vars.resolve(raw).unwrap_or(Cow::Borrowed(raw));
+    if matches_syntax(syntax, &value) {
+        return Contract::Kept;
     }
-    if syntax.contains("length") {
-        return number(vars, name).map(|(value, unit)| OptionKind::Number { value, unit });
+    match spec.initial.clone() {
+        Some(initial) => Contract::Initial(initial),
+        None => Contract::Invalid,
     }
-    if syntax.contains("number") || syntax.contains("integer") {
-        let value = vars.resolve(vars.get(name)?)?;
-        return value
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|value| OptionKind::Number {
-                value,
-                unit: String::new(),
-            });
+}
+
+/// Whether a value matches a `@property` syntax. The syntax is a list of
+/// alternatives separated by `|`, and `*` takes any value.
+fn matches_syntax(syntax: &str, value: &str) -> bool {
+    let syntax = syntax.trim();
+    if syntax == "*" {
+        return true;
     }
-    None
+    syntax.split('|').any(|part| matches_component(part, value))
+}
+
+/// Whether a value matches one type of a `@property` syntax, such as
+/// `<color>`. A type the reader cannot check does not reject a value.
+fn matches_component(component: &str, value: &str) -> bool {
+    match type_name(component).as_str() {
+        "color" => crate::color::parse(value, true).is_some(),
+        "length" => length_value(value).is_some(),
+        "percentage" => percentage_value(value).is_some(),
+        "length-percentage" => length_value(value).is_some() || percentage_value(value).is_some(),
+        "number" => plain_number(value).is_some(),
+        "integer" => plain_number(value).is_some_and(|number| number.fract() == 0.0),
+        "time" => duration_value(value).is_some(),
+        "url" => holds(value, "url("),
+        "string" => is_quoted(value),
+        "custom-ident" => is_ident(value),
+        "image" => holds(value, "url(") || holds(value, "gradient("),
+        "angle" => angle_value(value).is_some(),
+        _ => true,
+    }
+}
+
+/// The type a `@property` syntax component names, such as `color` for
+/// `<color>` and `length` for `<length [0,∞]>`.
+fn type_name(component: &str) -> String {
+    let component = component.trim();
+    let inner = component
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(component);
+    inner
+        .split(['[', ' '])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// A kind `@property` gives a value that its CSS text did not reveal. The
+/// syntax is a contract, so the value is checked against it and the type
+/// that holds it names the kind.
+fn property_kind(name: &str, dark: bool, spec: &PropertySpec, value: &str) -> Option<OptionKind> {
+    let syntax = spec.syntax.as_deref()?.trim();
+    if syntax == "*" {
+        return None;
+    }
+    let alternative = syntax
+        .split('|')
+        .map(str::trim)
+        .find(|part| matches_component(part, value))?;
+    match type_name(alternative).as_str() {
+        "color" => crate::color::parse(value, !dark).map(|color| OptionKind::Color { color }),
+        "percentage" => {
+            percent(value, name).map(|(value, percent)| OptionKind::Percent { value, percent })
+        }
+        "length" => number(value).map(|(value, unit)| OptionKind::Number { value, unit }),
+        "number" | "integer" => plain_number(value).map(|value| OptionKind::Number {
+            value,
+            unit: String::new(),
+        }),
+        _ => None,
+    }
 }
 
 fn choices(name: &str) -> Option<Vec<(String, String)>> {
@@ -439,12 +532,27 @@ fn note_choices(description: Option<&str>, current: &str) -> Option<Vec<(String,
         && choices
             .iter()
             .all(|(_, value)| matches!(value.as_str(), "off" | "on" | "true" | "false"));
-    (choices.len() >= 2
-        && !plain_toggle
+    if choices.len() < 2 {
+        return None;
+    }
+    if plain_toggle
         && choices
             .iter()
-            .any(|(_, value)| value.eq_ignore_ascii_case(current)))
-    .then_some(choices)
+            .any(|(_, value)| value.eq_ignore_ascii_case(current))
+    {
+        // A pair of on and off is a switch, and the switch reads better.
+        return None;
+    }
+    // The theme's own value joins the list when the comment's does not hold
+    // it, so the control keeps its choices and shows what the theme writes.
+    if !current.is_empty()
+        && !choices
+            .iter()
+            .any(|(_, value)| value.eq_ignore_ascii_case(current))
+    {
+        choices.push((title_case(current), current.to_owned()));
+    }
+    Some(choices)
 }
 
 /// The words comments commonly list as a choice without a colon. Keeping
@@ -642,11 +750,16 @@ fn meta_range(rest: &str, current: &str) -> Option<OptionKind> {
             }
         }
     }
-    if max <= min || value < min as f32 || value > max as f32 {
+    if max <= min {
         return None;
     }
+    let value = value.round() as i32;
+    // A value outside the range the theme declares would fall off the
+    // slider; the range grows to hold it rather than the control lost.
+    let min = min.min(value);
+    let max = max.max(value);
     Some(OptionKind::Range {
-        value: value.round() as i32,
+        value,
         min,
         max,
         step,
@@ -691,13 +804,33 @@ fn meta_unquote(text: &str) -> String {
 }
 
 fn image_name(name: &str) -> bool {
-    name.contains("image")
-        || name.contains("background")
-        || name.contains("logo")
-        || name.contains("avatar")
-        || name.contains("mark")
-        || name.contains("picture")
-        || name.contains("icon")
+    if holds(name, "color") || holds(name, "colour") {
+        // A colour is not a picture, whatever else the name says.
+        return false;
+    }
+    holds(name, "image")
+        || holds(name, "background")
+        || holds(name, "logo")
+        || holds(name, "avatar")
+        || holds(name, "mark")
+        || holds(name, "picture")
+        || holds(name, "icon")
+        || holds(name, "wallpaper")
+        || holds(name, "wall")
+        || holds(name, "banner")
+        || holds(name, "backdrop")
+        || holds(name, "cover")
+        || holds(name, "header")
+        || holds(name, "texture")
+        || holds(name, "pattern")
+}
+
+/// The address a `url(...)` names, as the theme writes it.
+fn picture_url(value: &str) -> Option<String> {
+    let start = find_ignore_case(value, "url(")?;
+    let rest = value.get(start + 4..)?;
+    let end = rest.find(')')?;
+    Some(rest[..end].trim().trim_matches(['"', '\'']).to_owned())
 }
 
 /// Whether a custom property names a font family, rather than its size,
@@ -718,32 +851,169 @@ fn font_name(name: &str) -> bool {
         || name.contains("typeface")
 }
 
-fn percent(vars: &Vars, name: &str) -> Option<(f32, bool)> {
-    let value = vars.resolve(vars.get(name)?)?;
+/// A percentage the theme writes, as the 0..100 a slider shows. A name
+/// that says opacity or alpha takes a fraction, as `--opacity: 0.5` is
+/// half; every other name takes the number as a percentage, so `--dim: 2`
+/// is two per cent and not two hundred.
+fn percent(value: &str, name: &str) -> Option<(f32, bool)> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
         return Some((percent.trim().parse::<f32>().ok()?.clamp(0.0, 100.0), true));
     }
-    let number = value.parse::<f32>().ok()?;
-    Some((
-        if number > 1.0 {
-            number.clamp(0.0, 100.0)
-        } else {
-            (number * 100.0).clamp(0.0, 100.0)
-        },
-        false,
-    ))
+    let number = plain_number(value)?;
+    if holds(name, "opacity") || holds(name, "alpha") {
+        Some(((number * 100.0).clamp(0.0, 100.0), false))
+    } else {
+        Some((number.clamp(0.0, 100.0), true))
+    }
 }
 
-fn number(vars: &Vars, name: &str) -> Option<(f32, String)> {
-    let value = vars.resolve(vars.get(name)?)?;
+/// A number with the unit that follows it, as the theme writes it. The
+/// unit is kept, so the control writes the value back in the theme's own
+/// unit; the number is the one the theme writes, not one settled to
+/// pixels, as a viewport or a font unit means something of its own.
+fn number(value: &str) -> Option<(f32, String)> {
     let value = value.trim();
-    for unit in ["px", "rem", "em", "ms", "s"] {
-        if let Some(number) = value.strip_suffix(unit) {
-            return Some((number.trim().parse::<f32>().ok()?, unit.to_owned()));
+    for unit in LENGTH_UNITS.iter().chain(DURATION_UNITS.iter()) {
+        let Some(head) = strip_unit(value, unit) else {
+            continue;
+        };
+        let Ok(number) = head.trim().parse::<f32>() else {
+            continue;
+        };
+        if !number.is_finite() {
+            continue;
         }
+        return Some((number, (*unit).to_owned()));
     }
     None
+}
+
+/// The units a length may carry: the ones the reader settles and the
+/// font-relative ones CSS defines.
+const LENGTH_UNITS: &[&str] = &[
+    "px", "rem", "rex", "rch", "ric", "rlh", "rcap", "em", "ex", "ch", "ic", "lh", "cap", "pt",
+    "pc", "in", "cm", "mm", "q", "svw", "svh", "svmin", "svmax", "lvw", "lvh", "lvmin", "lvmax",
+    "dvw", "dvh", "dvmin", "dvmax", "vw", "vh", "vmin", "vmax", "vi", "vb",
+];
+
+/// The units a duration may carry.
+const DURATION_UNITS: &[&str] = &["s", "ms"];
+
+/// The text before a unit at the end of a value, ignoring ASCII case as
+/// CSS units are case-insensitive.
+fn strip_unit<'a>(value: &'a str, unit: &str) -> Option<&'a str> {
+    let end = value.len().checked_sub(unit.len())?;
+    // A unit is ASCII, but the value before it need not be: cutting inside a
+    // multi-byte character is not a place a string can be split.
+    if !value.is_char_boundary(end) {
+        return None;
+    }
+    let (head, tail) = value.split_at(end);
+    tail.eq_ignore_ascii_case(unit).then_some(head)
+}
+
+/// A number with no unit, as `<number>` and `<integer>` want.
+fn plain_number(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = value.parse::<f32>().ok()?;
+    number.is_finite().then_some(number)
+}
+
+/// A number with a percentage sign.
+fn percentage_value(value: &str) -> Option<f32> {
+    plain_number(value.trim().strip_suffix('%')?)
+}
+
+/// A number with a length unit, as CSS allows a unitless zero.
+fn length_value(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(number) = plain_number(value) {
+        return (number == 0.0).then_some(number);
+    }
+    let (number, unit) = split_number(value)?;
+    let unit = unit.trim().to_ascii_lowercase();
+    LENGTH_UNITS.contains(&unit.as_str()).then_some(number)
+}
+
+/// A number with a duration unit, as the seconds it holds.
+fn duration_value(value: &str) -> Option<f32> {
+    let (number, unit) = split_number(value.trim())?;
+    let unit = unit.trim().to_ascii_lowercase();
+    if !DURATION_UNITS.contains(&unit.as_str()) {
+        return None;
+    }
+    Some(if unit == "ms" {
+        number / 1_000.0
+    } else {
+        number
+    })
+}
+
+/// A number with an angle unit.
+fn angle_value(value: &str) -> Option<f32> {
+    let (number, unit) = split_number(value.trim())?;
+    let unit = unit.trim().to_ascii_lowercase();
+    ["deg", "grad", "rad", "turn"]
+        .contains(&unit.as_str())
+        .then_some(number)
+}
+
+/// A quoted string, as `<string>` wants.
+fn is_quoted(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+}
+
+/// A bare name, as `<custom-ident>` wants.
+fn is_ident(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.starts_with(|character: char| character.is_ascii_digit())
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Whether `text` holds `needle`, ignoring ASCII case as CSS keywords
+/// are case-insensitive.
+fn holds(text: &str, needle: &str) -> bool {
+    let text = text.as_bytes();
+    let needle = needle.as_bytes();
+    needle.len() <= text.len()
+        && text
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// ReCord's flicker and beam: a duration or an opacity the window turns
+/// on and off. The unit matters, so `500ms` is half a second and not five
+/// hundred, and the switch writes the unit the theme uses.
+fn flicker_toggle(value: &str, flicker: bool) -> OptionKind {
+    let (number, unit) = split_number(value).unwrap_or((0.0, String::new()));
+    let unit = unit.trim().to_ascii_lowercase();
+    let amount = if unit == "ms" {
+        number / 1_000.0
+    } else {
+        number
+    };
+    let on = amount > 0.0;
+    let (on_value, off_value) = match (flicker, unit.as_str()) {
+        (true, "ms") => ("6000ms".to_owned(), "0ms".to_owned()),
+        (true, "s") => ("6s".to_owned(), "0s".to_owned()),
+        (true, _) => ("6s".to_owned(), "0".to_owned()),
+        (false, "ms") => ("500ms".to_owned(), "0ms".to_owned()),
+        (false, "s") => ("0.5s".to_owned(), "0s".to_owned()),
+        (false, _) => ("0.5".to_owned(), "0".to_owned()),
+    };
+    OptionKind::Toggle {
+        on,
+        on_value,
+        off_value,
+    }
 }
 
 /// A readable label, group and description for a custom property, from its
@@ -1975,8 +2245,11 @@ fn ambxst_group(name: &str) -> &'static str {
     }
 }
 
+/// Where a group sits in Appearance's list. The words a group's own name
+/// holds are matched without ASCII case, so a theme's heading may write
+/// them in any case; the name is read without an allocation, as the sort
+/// compares every pair.
 fn group_order(group: &str) -> u8 {
-    let lower = group.to_ascii_lowercase();
     match group {
         "ReCore look" => 0,
         "ReCord effects" => 1,
@@ -1995,18 +2268,36 @@ fn group_order(group: &str) -> u8 {
         "Pictures" => 14,
         "Effects" => 15,
         "Other" => 16,
-        _ if lower.contains("background") => 4,
-        _ if lower.contains("text") || lower.contains("font") => 5,
-        _ if lower.contains("channel") => 6,
-        _ if lower.contains("accent") || lower.contains("color") => 7,
-        _ if lower.contains("status") => 8,
-        _ if lower.contains("border") => 9,
-        _ if lower.contains("interface") => 10,
-        _ if lower.contains("type") => 12,
-        _ if lower.contains("size") || lower.contains("shape") => 13,
-        _ if lower.contains("picture") || lower.contains("image") => 14,
-        _ if lower.contains("effect") || lower.contains("animation") => 15,
-        _ => 17,
+        _ => group_order_by_word(group),
+    }
+}
+
+/// Where a group ReCore does not name sits, from the words it holds.
+fn group_order_by_word(group: &str) -> u8 {
+    if holds(group, "background") {
+        4
+    } else if holds(group, "text") || holds(group, "font") {
+        5
+    } else if holds(group, "channel") {
+        6
+    } else if holds(group, "accent") || holds(group, "color") {
+        7
+    } else if holds(group, "status") {
+        8
+    } else if holds(group, "border") {
+        9
+    } else if holds(group, "interface") {
+        10
+    } else if holds(group, "type") {
+        12
+    } else if holds(group, "size") || holds(group, "shape") {
+        13
+    } else if holds(group, "picture") || holds(group, "image") {
+        14
+    } else if holds(group, "effect") || holds(group, "animation") {
+        15
+    } else {
+        17
     }
 }
 
