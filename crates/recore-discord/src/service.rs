@@ -400,6 +400,20 @@ const DEFAULT_ARCHIVE: u16 = 4320;
 /// Discord's answer to a search of a DM it hasn't indexed yet.
 const INDEX_NOT_READY: u64 = 110000;
 
+/// What Discord says of a server's settings pages: the lists it gives
+/// whole, and how often it said the rest changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerSettings {
+    /// The server's AutoMod rules, as the rule events gave them.
+    pub automod: Arc<Vec<server_settings::ModerationRule>>,
+    /// The server's invites, as the invite events gave them.
+    pub invites: Arc<Vec<server_settings::Invite>>,
+    /// How often Discord said the server's other settings changed, as it
+    /// does for integrations and webhooks: the page that shows them asks
+    /// for them again, as the gateway names only the server.
+    pub changes: u64,
+}
+
 /// What the account looks like now. [`crate::cache`] keeps all but the live
 /// parts, the connection and voice, to show on the next start.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -477,6 +491,15 @@ pub struct Snapshot {
     /// privacy, while its talk goes on.
     #[serde(default)]
     pub stage_instances: Arc<HashMap<String, StageInstance>>,
+    /// Each channel's pinned messages, by channel id, as Discord last gave
+    /// them: a CHANNEL_PINS_UPDATE replaces a channel's list. Not kept, as
+    /// the pins are asked for again when a panel opens.
+    #[serde(skip)]
+    pub pins: Arc<HashMap<String, Arc<Vec<Message>>>>,
+    /// Each server's settings, by server id, as Discord last gave them.
+    /// Not kept, as a page asks for them again when it opens.
+    #[serde(skip)]
+    pub server_settings: Arc<HashMap<String, ServerSettings>>,
     /// The channel whose member list is on screen, and how many people can
     /// read it.
     #[serde(skip)]

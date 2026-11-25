@@ -613,6 +613,14 @@ impl Session<'_> {
     async fn event(&mut self, mut dispatch: Dispatch) -> Result<()> {
         self.place_ephemeral(&mut dispatch);
         let (event, data) = (&dispatch.event, &dispatch.data);
+        // Discord sends events ReCore has no name for; naming them shows
+        // when its protocol changes.
+        if let Event::Other(name) = event {
+            tracing::debug!(
+                name = name.as_str(),
+                "Discord sent an event ReCore doesn't know"
+            );
+        }
         // A server update that no join or stream waits for moves one
         // under way.
         let awaited = match event {

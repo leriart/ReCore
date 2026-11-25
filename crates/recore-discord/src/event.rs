@@ -91,6 +91,20 @@ events! {
     GuildRoleUpdate = "GUILD_ROLE_UPDATE",
     GuildRoleDelete = "GUILD_ROLE_DELETE",
     GuildEmojisUpdate = "GUILD_EMOJIS_UPDATE",
+    /// A server's integrations changed.
+    GuildIntegrationsUpdate = "GUILD_INTEGRATIONS_UPDATE",
+    /// A server's webhooks changed.
+    WebhooksUpdate = "WEBHOOKS_UPDATE",
+    /// A server's AutoMod rule was made.
+    AutoModerationRuleCreate = "AUTO_MODERATION_RULE_CREATE",
+    /// A server's AutoMod rule changed.
+    AutoModerationRuleUpdate = "AUTO_MODERATION_RULE_UPDATE",
+    /// A server's AutoMod rule went.
+    AutoModerationRuleDelete = "AUTO_MODERATION_RULE_DELETE",
+    /// An invite to a server was made.
+    InviteCreate = "INVITE_CREATE",
+    /// An invite to a server went.
+    InviteDelete = "INVITE_DELETE",
     /// This account's note on someone changed.
     UserNoteUpdate = "USER_NOTE_UPDATE",
     /// The Activity panel's feed has something new to fetch.
@@ -99,10 +113,16 @@ events! {
     GuildScheduledEventCreate = "GUILD_SCHEDULED_EVENT_CREATE",
     GuildScheduledEventUpdate = "GUILD_SCHEDULED_EVENT_UPDATE",
     GuildScheduledEventDelete = "GUILD_SCHEDULED_EVENT_DELETE",
+    /// Someone subscribed to a scheduled event.
+    GuildScheduledEventUserAdd = "GUILD_SCHEDULED_EVENT_USER_ADD",
+    /// Someone unsubscribed from a scheduled event.
+    GuildScheduledEventUserRemove = "GUILD_SCHEDULED_EVENT_USER_REMOVE",
     GuildStickersUpdate = "GUILD_STICKERS_UPDATE",
     ChannelCreate = "CHANNEL_CREATE",
     ChannelUpdate = "CHANNEL_UPDATE",
     ChannelDelete = "CHANNEL_DELETE",
+    /// A channel's pinned messages changed, as one was pinned or unpinned.
+    ChannelPinsUpdate = "CHANNEL_PINS_UPDATE",
     /// Threads: one made, or that this account joined or was added to.
     ThreadCreate = "THREAD_CREATE",
     ThreadUpdate = "THREAD_UPDATE",
@@ -216,6 +236,22 @@ mod tests {
             ("GUILD_ROLE_UPDATE", Event::GuildRoleUpdate),
             ("GUILD_ROLE_DELETE", Event::GuildRoleDelete),
             ("GUILD_EMOJIS_UPDATE", Event::GuildEmojisUpdate),
+            ("GUILD_INTEGRATIONS_UPDATE", Event::GuildIntegrationsUpdate),
+            ("WEBHOOKS_UPDATE", Event::WebhooksUpdate),
+            (
+                "AUTO_MODERATION_RULE_CREATE",
+                Event::AutoModerationRuleCreate,
+            ),
+            (
+                "AUTO_MODERATION_RULE_UPDATE",
+                Event::AutoModerationRuleUpdate,
+            ),
+            (
+                "AUTO_MODERATION_RULE_DELETE",
+                Event::AutoModerationRuleDelete,
+            ),
+            ("INVITE_CREATE", Event::InviteCreate),
+            ("INVITE_DELETE", Event::InviteDelete),
             ("USER_NOTE_UPDATE", Event::UserNoteUpdate),
             (
                 "CONTENT_INVENTORY_INBOX_STALE",
@@ -233,10 +269,19 @@ mod tests {
                 "GUILD_SCHEDULED_EVENT_DELETE",
                 Event::GuildScheduledEventDelete,
             ),
+            (
+                "GUILD_SCHEDULED_EVENT_USER_ADD",
+                Event::GuildScheduledEventUserAdd,
+            ),
+            (
+                "GUILD_SCHEDULED_EVENT_USER_REMOVE",
+                Event::GuildScheduledEventUserRemove,
+            ),
             ("GUILD_STICKERS_UPDATE", Event::GuildStickersUpdate),
             ("CHANNEL_CREATE", Event::ChannelCreate),
             ("CHANNEL_UPDATE", Event::ChannelUpdate),
             ("CHANNEL_DELETE", Event::ChannelDelete),
+            ("CHANNEL_PINS_UPDATE", Event::ChannelPinsUpdate),
             ("THREAD_CREATE", Event::ThreadCreate),
             ("THREAD_UPDATE", Event::ThreadUpdate),
             ("THREAD_DELETE", Event::ThreadDelete),
