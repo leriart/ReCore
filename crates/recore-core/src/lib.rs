@@ -4,12 +4,6 @@
 #![recursion_limit = "256"]
 // A build without networks only runs the preview and device checks.
 #![cfg_attr(not(any(feature = "matrix", feature = "discord")), allow(dead_code))]
-// Sample frames are read in fixed-size steps, and `chunks_exact` names the
-// step at the read, next to the samples it gives.
-#![allow(
-    clippy::chunks_exact_to_as_chunks,
-    reason = "a sample frame's width reads clearest where the chunk is taken"
-)]
 
 use anyhow::Context;
 /// The Discord protocol, for clients that hand the application Discord's
