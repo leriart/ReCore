@@ -92,6 +92,14 @@ pub const THREAD_PAGE: u32 = 25;
 /// batch this full may have more after it.
 pub const BANS_PAGE: usize = 1000;
 
+/// How many pinned messages one page of a channel's pins holds, as
+/// Discord allows.
+pub const PIN_PAGE: usize = 50;
+
+/// How many members one page of a server's members holds, as Discord
+/// allows.
+pub const MEMBERS_PAGE: usize = 1000;
+
 /// What a members search gave: Discord's answer, or the seconds to wait
 /// while it indexes the server.
 #[derive(Debug)]
@@ -127,6 +135,15 @@ pub enum Span<'a> {
     /// Those on both sides of a snowflake, as for a jump to a message;
     /// Discord answers even when no message has it.
     Around(&'a str),
+}
+
+/// A page of a channel's pinned messages.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pins {
+    /// The pinned messages, the latest pinned first.
+    pub messages: Vec<Value>,
+    /// Discord may have more pins after these.
+    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +275,17 @@ impl std::error::Error for Stalled {}
 /// wait, until ReCore closed.
 const STALL: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long a request to Discord may take, from opening the connection to
+/// the last byte of the answer. A connection that is accepted and then
+/// stalls sends nothing more, and without a limit that request would wait
+/// for ever.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long an upload to Discord's storage may take. A big file on a slow
+/// line needs minutes, and a connection that stalls must not hold the
+/// message for ever.
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Discord's own code and words for a refusal, in its error's chain: `{:#}`
 /// shows them, and [`code`] finds the code.
 #[derive(Debug)]
@@ -315,7 +343,11 @@ pub enum Login {
 }
 
 pub struct Api {
+    /// Discord's API, with a deadline on each request.
     http: Client,
+    /// Discord's files, without a deadline on the whole: a large file
+    /// takes as long as it takes, and each part of it has its own.
+    files: Client,
     pub(crate) attachment_privacy: RwLock<crate::attachment_privacy::AttachmentPrivacy>,
     /// Empty without a login; Discord may refresh it in READY.
     token: RwLock<String>,
@@ -341,9 +373,22 @@ impl Api {
             .user_agent(client::user_agent())
             .cookie_provider(crate::cookies::jar())
             .connect_timeout(std::time::Duration::from_secs(15))
+            // A request that is accepted and then stalls sends nothing
+            // more, and without a deadline it would wait for ever.
+            .timeout(REQUEST_TIMEOUT)
             // Requests to a host share one HTTP/2 connection. While some are
             // waiting, a ping that goes unanswered closes it, so the next
             // request opens a new one rather than waiting on a lost one.
+            .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("could not set up HTTPS")?;
+        // Discord's files come without a deadline on the whole: a large
+        // file takes as long as it takes, and each part of it has its own.
+        let files = Client::builder()
+            .user_agent(client::user_agent())
+            .cookie_provider(crate::cookies::jar())
+            .connect_timeout(std::time::Duration::from_secs(15))
             .http2_keep_alive_interval(std::time::Duration::from_secs(10))
             .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
             .build()
@@ -354,6 +399,7 @@ impl Api {
         };
         Ok(Self {
             http,
+            files,
             attachment_privacy: RwLock::default(),
             token: RwLock::new(token),
             base,
@@ -565,6 +611,18 @@ impl Api {
         serde_json::from_value(body).context("could not understand Discord's answer")
     }
 
+    /// The address of Discord's gateway, as `GET /gateway` gives it: the
+    /// WebSocket address to open the connection to. Discord's docs ask a
+    /// client to keep the answer, and to ask again only when a connection
+    /// to it fails.
+    pub async fn gateway(&self) -> Result<String> {
+        let answer = self.json(self.request(Method::GET, "/gateway")).await?;
+        answer["url"]
+            .as_str()
+            .map(str::to_owned)
+            .context("Discord gave no address for its gateway.")
+    }
+
     /// Streams the games Discord detects to `file`, so no whole copy of the
     /// list sits in memory. As Discord's desktop client does, it asks the
     /// CDN, which answers without the list when `etag` is still its version.
@@ -576,7 +634,7 @@ impl Api {
         use tokio::io::AsyncWriteExt;
         const LIMIT: u64 = 32 * 1024 * 1024;
         let mut request = self
-            .http
+            .files
             .get(format!("{}/detectables/games-v1.json", crate::ready::cdn()));
         if let Some(etag) = etag {
             request = request.header(header::IF_NONE_MATCH, etag);
@@ -867,10 +925,7 @@ impl Api {
         if response.status() == StatusCode::ACCEPTED {
             return Ok(None);
         }
-        let body = response
-            .bytes()
-            .await
-            .context("could not read Discord's answer")?;
+        let body = bytes(response).await?;
         Ok(Some(
             serde_json::from_slice(&body).context("could not understand Discord's answer")?,
         ))
@@ -927,13 +982,23 @@ impl Api {
             bail!("could not understand Discord's answer");
         };
         // The upload URL is signed, so it takes no login.
-        let response = self
-            .http
-            .put(url)
-            .body(data)
-            .send()
+        let path = url::Url::parse(url)
+            .map(|address| address.path().to_owned())
+            .unwrap_or_else(|_| url.to_owned());
+        let route = limits::route(&Method::PUT, &path);
+        // Discord's storage counts uploads like any other request, so
+        // ReCore waits its turn.
+        if let Err(wait) = self.limits.acquire(&route).await {
+            bail!(
+                "Discord asks ReCore to slow down. Try again in {} s.",
+                wait.as_secs()
+            );
+        }
+        let response = tokio::time::timeout(UPLOAD_TIMEOUT, self.files.put(url).body(data).send())
             .await
+            .map_err(|_| anyhow!("Discord's file storage stopped taking the file."))?
             .context("Can't reach Discord's file storage.")?;
+        self.limits.update(&route, response.headers());
         if !response.status().is_success() {
             bail!("Discord's file storage answered {}.", response.status());
         }
@@ -1221,13 +1286,36 @@ impl Api {
 
     /// A channel's pinned messages, the latest pinned first: up to [`PAGE`].
     pub async fn pins(&self, channel: &str) -> Result<Vec<Value>> {
-        let path = format!("/channels/{channel}/messages/pins?limit={PAGE}");
+        Ok(self.pins_page(channel, None, None).await?.messages)
+    }
+
+    /// A page of a channel's pinned messages, the latest pinned first: up
+    /// to [`PIN_PAGE`]. `before` and `after` are the ids of pinned
+    /// messages, so a page goes on either side of one; Discord's docs
+    /// give `before` as a time, but the web client sends a message's id.
+    pub async fn pins_page(
+        &self,
+        channel: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<Pins> {
+        let mut path = format!("/channels/{channel}/messages/pins?limit={PIN_PAGE}");
+        if let Some(before) = before {
+            let _ = write!(path, "&before={before}");
+        }
+        if let Some(after) = after {
+            let _ = write!(path, "&after={after}");
+        }
         let mut answer = self.json(self.request(Method::GET, &path)).await?;
+        let has_more = answer["has_more"].as_bool().unwrap_or(false);
         match answer["items"].take() {
-            Value::Array(items) => Ok(items
-                .into_iter()
-                .map(|mut item| item["message"].take())
-                .collect()),
+            Value::Array(items) => Ok(Pins {
+                messages: items
+                    .into_iter()
+                    .map(|mut item| item["message"].take())
+                    .collect(),
+                has_more,
+            }),
             _ => bail!("could not understand Discord's answer"),
         }
     }
@@ -1274,10 +1362,7 @@ impl Api {
                 });
             return Ok(Searched::Indexing(seconds));
         }
-        let body = response
-            .bytes()
-            .await
-            .context("could not read Discord's answer")?;
+        let body = bytes(response).await?;
         let page =
             serde_json::from_slice(&body).context("could not understand Discord's answer")?;
         Ok(Searched::Page(page))
@@ -1303,6 +1388,32 @@ impl Api {
                  &sort_order=desc&limit={THREAD_PAGE}&tag_setting=match_some&offset={offset}"
             ),
         };
+        self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// A channel's threads that are going on, public and private, as
+    /// Discord's client asks for them. Discord's docs say this route is
+    /// for bots, and that a user account is refused.
+    pub async fn active_threads(&self, channel: &str) -> Result<Value> {
+        let path = format!("/channels/{channel}/threads/active");
+        self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// A channel's archived threads, public or private, the newest
+    /// archived first: at most `limit`, and `before` the time a thread
+    /// was archived, as Discord's client asks for them.
+    pub async fn archived_threads(
+        &self,
+        channel: &str,
+        private: bool,
+        before: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let kind = if private { "private" } else { "public" };
+        let mut path = format!("/channels/{channel}/threads/archived/{kind}?limit={limit}");
+        if let Some(before) = before {
+            let _ = write!(path, "&before={before}");
+        }
         self.json(self.request(Method::GET, &path)).await
     }
 
@@ -1828,10 +1939,7 @@ impl Api {
             .execute(with_json(self.request(Method::POST, &path), body))
             .await?;
         let indexing = response.status() == StatusCode::ACCEPTED;
-        let body = response
-            .bytes()
-            .await
-            .context("could not read Discord's answer")?;
+        let body = bytes(response).await?;
         let body: Value =
             serde_json::from_slice(&body).context("could not understand Discord's answer")?;
         Ok(if indexing {
@@ -1839,6 +1947,26 @@ impl Api {
         } else {
             MembersSearch::Found(body)
         })
+    }
+
+    /// A server's members, a page of them: after a member's id, at most
+    /// [`MEMBERS_PAGE`]. Discord's docs say this route is for bots, and
+    /// that a user account is refused; ReCore asks it all the same, and
+    /// keeps what it gets.
+    pub async fn guild_members(
+        &self,
+        guild: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Value>> {
+        let mut path = format!("/guilds/{guild}/members?limit={limit}");
+        if let Some(after) = after {
+            let _ = write!(path, "&after={after}");
+        }
+        match self.json(self.request(Method::GET, &path)).await? {
+            Value::Array(members) => Ok(members),
+            _ => bail!("could not understand Discord's answer"),
+        }
     }
 
     /// A server's invites, as Invites in its settings lists them; it takes
@@ -1978,6 +2106,23 @@ impl Api {
     pub async fn create_webhook(&self, channel: &str, body: &Value) -> Result<Value> {
         let path = format!("/channels/{channel}/webhooks");
         self.json(with_json(self.request(Method::POST, &path), body))
+            .await
+    }
+
+    /// A webhook, as `GET /webhooks/{id}` gives it: its name, picture,
+    /// channel and, for an incoming one, its token and address. Discord
+    /// sends the token only to those who may manage webhooks.
+    pub async fn webhook(&self, webhook: &str) -> Result<Value> {
+        let path = format!("/webhooks/{webhook}");
+        self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// Changes a webhook's name, picture or channel, as Webhooks' own
+    /// fields do. Discord answers with the webhook, and sends
+    /// WEBHOOKS_UPDATE.
+    pub async fn edit_webhook(&self, webhook: &str, body: &Value) -> Result<Value> {
+        let path = format!("/webhooks/{webhook}");
+        self.json(with_json(self.request(Method::PATCH, &path), body))
             .await
     }
 
@@ -2270,13 +2415,8 @@ impl Api {
         if response.status() == StatusCode::NO_CONTENT {
             bail!("This server has paused invites.");
         }
-        let invite: Value = serde_json::from_slice(
-            &response
-                .bytes()
-                .await
-                .context("could not read Discord's answer")?,
-        )
-        .context("could not understand Discord's answer")?;
+        let invite: Value = serde_json::from_slice(&bytes(response).await?)
+            .context("could not understand Discord's answer")?;
         invite["code"]
             .as_str()
             .map(str::to_owned)
@@ -2303,6 +2443,46 @@ impl Api {
     pub async fn scheduled_event(&self, guild: &str, event: &str) -> Result<Value> {
         let path = format!("/guilds/{guild}/scheduled-events/{event}?with_user_count=true");
         self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// A server's scheduled events that are to come or going on, with how
+    /// many people are interested in each, as Discord's client asks for
+    /// them.
+    pub async fn scheduled_events(&self, guild: &str) -> Result<Value> {
+        let path = format!("/guilds/{guild}/scheduled-events?with_user_count=true");
+        self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// Makes a server's scheduled event from `body`, as
+    /// [`crate::scheduled_event::Draft`] makes it: where it happens, when,
+    /// and what it says. Discord answers with the event, and sends
+    /// GUILD_SCHEDULED_EVENT_CREATE.
+    pub async fn create_scheduled_event(&self, guild: &str, body: &Value) -> Result<Value> {
+        let path = format!("/guilds/{guild}/scheduled-events");
+        self.json(with_json(self.request(Method::POST, &path), body))
+            .await
+    }
+
+    /// Changes a server's scheduled event's fields that `body` names: its
+    /// name, times, place, picture, description and privacy level. Its
+    /// `status` says whether the event starts or ends. Discord answers
+    /// with the event, and sends GUILD_SCHEDULED_EVENT_UPDATE.
+    pub async fn modify_scheduled_event(
+        &self,
+        guild: &str,
+        event: &str,
+        body: &Value,
+    ) -> Result<Value> {
+        let path = format!("/guilds/{guild}/scheduled-events/{event}");
+        self.json(with_json(self.request(Method::PATCH, &path), body))
+            .await
+    }
+
+    /// Deletes a server's scheduled event; Discord sends
+    /// GUILD_SCHEDULED_EVENT_DELETE.
+    pub async fn delete_scheduled_event(&self, guild: &str, event: &str) -> Result<()> {
+        let path = format!("/guilds/{guild}/scheduled-events/{event}");
+        self.empty(self.request(Method::DELETE, &path)).await
     }
 
     /// This account's scheduled-event subscriptions in a server.
@@ -2665,7 +2845,7 @@ impl Api {
             None => format!("bytes={from}-"),
         };
         let response = self
-            .send_file(self.http.get(url).header(header::RANGE, range))
+            .send_file(self.files.get(url).header(header::RANGE, range))
             .await?;
         let (start, size) = if response.status() == StatusCode::PARTIAL_CONTENT {
             response
@@ -2708,7 +2888,7 @@ impl Api {
 
     /// Asks for a file, giving up if Discord doesn't answer within [`STALL`].
     async fn get_file(&self, url: &str) -> Result<Response> {
-        self.send_file(self.http.get(url)).await
+        self.send_file(self.files.get(url)).await
     }
 
     /// Sends a request for a file as [`Self::get_file`] does.
@@ -2737,10 +2917,7 @@ impl Api {
 
     async fn json(&self, request: RequestBuilder) -> Result<Value> {
         let response = self.execute(request).await?;
-        let body = response
-            .bytes()
-            .await
-            .context("could not read Discord's answer")?;
+        let body = bytes(response).await?;
         serde_json::from_slice(&body).context("could not understand Discord's answer")
     }
 
@@ -2835,10 +3012,21 @@ async fn checked(response: Response) -> Result<Response> {
 
 /// An answer's JSON body, or null.
 async fn body(response: Response) -> Value {
-    match response.bytes().await {
-        Ok(body) => serde_json::from_slice(&body).unwrap_or_default(),
-        Err(_) => Value::Null,
+    match tokio::time::timeout(REQUEST_TIMEOUT, response.bytes()).await {
+        Ok(Ok(body)) => serde_json::from_slice(&body).unwrap_or_default(),
+        _ => Value::Null,
     }
+}
+
+/// An answer's bytes, read with a deadline: a connection that is accepted
+/// and then stalls sends nothing more, and without one the read would wait
+/// for ever.
+async fn bytes(response: Response) -> Result<Vec<u8>> {
+    let body = tokio::time::timeout(REQUEST_TIMEOUT, response.bytes())
+        .await
+        .map_err(|_| anyhow!("Discord stopped answering."))?
+        .context("could not read Discord's answer")?;
+    Ok(body.to_vec())
 }
 
 /// A refusal with this status and body, as an error a person can act on.
