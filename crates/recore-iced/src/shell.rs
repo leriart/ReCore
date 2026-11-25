@@ -684,7 +684,9 @@ impl App {
         let focused = self.shell.focused;
         let reading = focused && self.client.state().selected.as_ref() == Some(&alert.room);
         let streamer = self.layout.prefs.streamer_mode.unwrap_or(false);
-        let mut task = Task::none();
+        // Each part adds a task beside the others rather than replacing one:
+        // a toast's timer has to outlive the flash a background alert asks for.
+        let mut tasks = Vec::new();
         if !alert.call && !reading && !streamer {
             crate::call::play(
                 self,
@@ -696,7 +698,7 @@ impl App {
             );
             // What sounded shows over the window, too, so it can be read
             // without leaving the room in front.
-            task = Task::batch([task, crate::toast::show(self, alert.clone())]);
+            tasks.push(crate::toast::show(self, alert.clone()));
         }
         let prefs = &self.layout.prefs;
         if !focused
@@ -704,7 +706,10 @@ impl App {
             && prefs.flash_taskbar.unwrap_or(true)
             && let Some(id) = self.shell.window
         {
-            task = window::request_user_attention(id, Some(window::UserAttention::Informational));
+            tasks.push(window::request_user_attention(
+                id,
+                Some(window::UserAttention::Informational),
+            ));
         }
         if prefs.notifications.unwrap_or(true)
             && !focused
@@ -713,7 +718,7 @@ impl App {
         {
             notifier.show(alert, prefs.notification_text.unwrap_or(true));
         }
-        task
+        Task::batch(tasks)
     }
 
     /// Opens a Discord link a start handed over, once Discord is online and
