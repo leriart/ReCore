@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::color::{Rgba, parse as parse_color};
@@ -160,6 +161,13 @@ pub struct Stylesheet {
 }
 
 impl Stylesheet {
+    /// A warning the reader says only once, however often it happens.
+    fn warn_once(&mut self, message: &str) {
+        if !self.warnings.iter().any(|warning| warning == message) {
+            self.warnings.push(message.to_owned());
+        }
+    }
+
     /// The order of `name` among the cascade layers, adding it when new.
     fn layer_rank(&mut self, name: &str) -> u32 {
         if let Some(index) = self.layers.iter().position(|known| known == name) {
@@ -217,6 +225,7 @@ pub fn parse_in(
 ) -> Stylesheet {
     let mut stylesheet = Stylesheet::default();
     let mut chain = Vec::new();
+    let mut budget = MAX_TEXT;
     expand(
         text,
         base,
@@ -227,6 +236,7 @@ pub fn parse_in(
         0,
         None,
         None,
+        &mut budget,
     );
     stylesheet
 }
@@ -247,6 +257,7 @@ fn expand(
     depth: usize,
     layer: Option<u32>,
     scheme: Option<bool>,
+    budget: &mut usize,
 ) {
     if depth > 16 {
         stylesheet
@@ -353,6 +364,7 @@ fn expand(
                     origin.as_deref(),
                     layer,
                     0,
+                    budget,
                 );
                 seen_rule = true;
             }
@@ -407,6 +419,7 @@ fn expand(
                                             depth + 1,
                                             rank,
                                             media_scheme(&condition.media).or(scheme),
+                                            budget,
                                         );
                                     }
                                 }
@@ -439,6 +452,7 @@ fn expand(
             origin.as_deref(),
             layer,
             0,
+            budget,
         );
     }
     if here.is_some() {
@@ -449,6 +463,30 @@ fn expand(
 /// How deep blocks may nest before the reader stops, so a file of nothing
 /// but `@media {` cannot exhaust the stack.
 const MAX_NESTING: usize = 64;
+
+/// How many rules a stylesheet may hold. A nested rule is copied once per
+/// parent and child selector, and every copy is read again, so a theme that
+/// nests deeply would hold billions of rules; the reader stops here and
+/// says so.
+const MAX_RULES: usize = 100_000;
+
+/// How many selectors one nested rule may expand to. A rule with a list of
+/// parents and a list of children multiplies them, and the multiplication
+/// grows at every level; the reader keeps this many and says so.
+const MAX_EXPANSION: usize = 32;
+
+/// The text a stylesheet may be read from, in bytes, the nested copies
+/// included. A theme is at most 8 MiB, so this leaves room for a nested
+/// theme's copies and stops a hostile one before it is read many times over.
+const MAX_TEXT: usize = 32 << 20;
+
+/// The stride a layer's rank is packed in, above a selector's specificity.
+const LAYER_STRIDE: u32 = 1_000_000;
+
+/// The weight a declaration outside every layer carries. It outranks every
+/// layer for an ordinary declaration, and loses to every layer for an
+/// important one, as CSS Cascade 5 §6.4.3 says.
+const UNLAYERED_WEIGHT: u32 = 1_000_000_000;
 
 /// Reads a block's rules into `stylesheet`.
 #[allow(
@@ -463,6 +501,7 @@ fn parse_block(
     origin: Option<&str>,
     layer: Option<u32>,
     nesting: usize,
+    budget: &mut usize,
 ) {
     if nesting > MAX_NESTING {
         stylesheet
@@ -470,9 +509,23 @@ fn parse_block(
             .push("more than 64 nested blocks; stopped".into());
         return;
     }
+    // A nested rule is copied and read again at every level, so the text a
+    // theme is read from is more than the file; the reader stops at the
+    // budget and keeps what it has read.
+    if *budget == 0 {
+        stylesheet.warn_once("the theme reads more than the reader reads; the rest is left out");
+        return;
+    }
+    *budget = budget.saturating_sub(text.len());
     let mut index = 0;
     let bytes = text.as_bytes();
     while index < bytes.len() {
+        if stylesheet.rules.len() >= MAX_RULES {
+            stylesheet.warn_once(
+                "the theme holds more rules than the reader keeps; the rest is left out",
+            );
+            break;
+        }
         while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
@@ -575,6 +628,7 @@ fn parse_block(
                         origin,
                         Some(rank),
                         nesting + 1,
+                        budget,
                     );
                 }
                 "media" | "supports" | "container" | "scope" | "document" => {
@@ -606,6 +660,7 @@ fn parse_block(
                             origin,
                             layer,
                             nesting + 1,
+                            budget,
                         );
                         containers.pop();
                     } else {
@@ -617,11 +672,15 @@ fn parse_block(
                             origin,
                             layer,
                             nesting + 1,
+                            budget,
                         );
                     }
                 }
                 "property" => {
-                    let name = prelude.strip_prefix("@property").unwrap_or(prelude).trim();
+                    // The at-rule's name is written in any case, as CSS
+                    // allows: `@PROPERTY --x` is the same rule as
+                    // `@property --x`.
+                    let name = prelude_after(prelude, "property").trim();
                     if name.starts_with("--") {
                         let mut spec = PropertySpec::default();
                         for declaration in declarations(&body) {
@@ -695,7 +754,12 @@ fn parse_block(
             });
         }
         for (nested_prelude, nested_body) in nested {
-            let expanded = nested_css(&selectors, &nested_prelude, &nested_body);
+            let (expanded, kept) = nested_css(&selectors, &nested_prelude, &nested_body);
+            if !kept {
+                stylesheet.warn_once(
+                    "a nested rule names more selectors than the reader keeps; the rest is left out",
+                );
+            }
             parse_block(
                 &expanded,
                 stylesheet,
@@ -704,6 +768,7 @@ fn parse_block(
                 origin,
                 layer,
                 nesting + 1,
+                budget,
             );
         }
     }
@@ -722,6 +787,10 @@ fn split_rule_body(body: &str) -> (String, Vec<(String, String)>) {
     let mut depth = 0u32;
     let mut quote: Option<u8> = None;
     let mut escaped = false;
+    // The last `;` at the top level, so a nested rule's prelude is not
+    // mistaken for a declaration. It is found in this one pass, rather than
+    // by reading the prefix again for every nested rule.
+    let mut last_semicolon = None;
     while index < bytes.len() {
         let byte = bytes[index];
         if escaped {
@@ -735,19 +804,26 @@ fn split_rule_body(body: &str) -> (String, Vec<(String, String)>) {
             b'"' | b'\'' if quote.is_none() => quote = Some(byte),
             b'(' if quote.is_none() => depth += 1,
             b')' if quote.is_none() => depth = depth.saturating_sub(1),
+            b';' if quote.is_none() && depth == 0 => {
+                last_semicolon = Some(index + 1);
+                index += 1;
+            }
             b'{' if quote.is_none() && depth == 0 => {
                 let Some(close) = matching_brace(body, index) else {
                     break;
                 };
                 let before = &body[chunk..index];
-                let (plain, prelude) = split_last_declaration(before);
-                own.push_str(plain);
-                let prelude = prelude.trim();
+                // The declarations of the rule end at the last `;`; what
+                // follows it is the prelude of the nested rule.
+                let at = last_semicolon.filter(|at| *at >= chunk).unwrap_or(chunk) - chunk;
+                own.push_str(&before[..at]);
+                let prelude = before[at..].trim();
                 if !prelude.is_empty() {
                     nested.push((prelude.to_owned(), body[index + 1..close].to_owned()));
                 }
                 index = close + 1;
                 chunk = index;
+                last_semicolon = None;
                 continue;
             }
             _ => {}
@@ -758,52 +834,37 @@ fn split_rule_body(body: &str) -> (String, Vec<(String, String)>) {
     (own, nested)
 }
 
-/// Splits `text` after its last top-level `;`, so a nested rule's prelude is
-/// not mistaken for a declaration.
-fn split_last_declaration(text: &str) -> (&str, &str) {
-    let bytes = text.as_bytes();
-    let mut depth = 0u32;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    let mut last = None;
-    for (index, &byte) in bytes.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match byte {
-            b'\\' => escaped = true,
-            b'"' | b'\'' if quote == Some(byte) => quote = None,
-            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
-            b'(' if quote.is_none() => depth += 1,
-            b')' if quote.is_none() => depth = depth.saturating_sub(1),
-            b';' if quote.is_none() && depth == 0 => last = Some(index + 1),
-            _ => {}
-        }
-    }
-    match last {
-        Some(at) => text.split_at(at),
-        None => ("", text),
-    }
-}
-
-/// A nested rule or at-rule, expressed for the flat parser.
-fn nested_css(parents: &[String], prelude: &str, body: &str) -> String {
+/// A nested rule or at-rule, expressed for the flat parser, and whether
+/// every selector of it was kept.
+///
+/// A rule with a list of parents and a list of children multiplies them,
+/// and the copy is read again, so the multiplication grows at every level.
+/// The reader keeps [`MAX_EXPANSION`] selectors of one expansion and says
+/// so when it leaves any out.
+fn nested_css(parents: &[String], prelude: &str, body: &str) -> (String, bool) {
     let mut out = String::new();
+    let mut kept = 0usize;
     if prelude.trim_start().starts_with('@') {
         out.push_str(prelude.trim());
         out.push('{');
         for parent in parents {
+            if kept >= MAX_EXPANSION {
+                return (out, false);
+            }
             out.push_str(parent);
             out.push('{');
             out.push_str(body);
             out.push('}');
+            kept += 1;
         }
         out.push('}');
-        return out;
+        return (out, true);
     }
     for parent in parents {
         for child in crate::color::split_top(prelude, ',') {
+            if kept >= MAX_EXPANSION {
+                return (out, false);
+            }
             let child = child.trim();
             let selector = if child.contains('&') {
                 child.replace('&', parent)
@@ -814,9 +875,10 @@ fn nested_css(parents: &[String], prelude: &str, body: &str) -> String {
             out.push('{');
             out.push_str(body);
             out.push('}');
+            kept += 1;
         }
     }
-    out
+    (out, true)
 }
 
 /// Rewrites every length with an absolute or viewport unit as its value in
@@ -1306,7 +1368,13 @@ fn media_feature(feature: &str, scheme: Option<bool>) -> bool {
             "portrait" => height() > width(),
             _ => true,
         },
-        "prefers-color-scheme" => scheme.unwrap_or(true),
+        // A query that asks for an appearance is true under that one; with
+        // no appearance to judge it by, it stays applicable.
+        "prefers-color-scheme" => match (value.as_str(), scheme) {
+            ("dark", Some(dark)) => dark,
+            ("light", Some(dark)) => !dark,
+            _ => true,
+        },
         "prefers-reduced-motion" => value != "reduce",
         "prefers-reduced-transparency" => value == "no-preference",
         "prefers-reduced-data" => value != "reduce",
@@ -2027,7 +2095,7 @@ fn collect_notes(text: &str, notes: &mut BTreeMap<String, Note>) {
     let mut depth = 0u32;
     let mut quote: Option<u8> = None;
     let mut escaped = false;
-    let mut last_prop: Option<(String, usize)> = None;
+    let mut last_prop: Option<(&str, usize)> = None;
     let mut section: Option<String> = None;
     let mut pending: Option<String> = None;
     let mut significant = 0u8;
@@ -2074,10 +2142,10 @@ fn collect_notes(text: &str, notes: &mut BTreeMap<String, Note>) {
                     && *prop_line == start_line
                 {
                     if let Some(description) = note.description {
-                        notes.entry(name.clone()).or_default().description = Some(description);
+                        note_for(notes, name).description = Some(description);
                     }
                     if let Some(default) = note.default_value {
-                        notes.entry(name.clone()).or_default().default_value = Some(default);
+                        note_for(notes, name).default_value = Some(default);
                     }
                     continue;
                 }
@@ -2110,7 +2178,7 @@ fn collect_notes(text: &str, notes: &mut BTreeMap<String, Note>) {
             }
             b'-' if bytes.get(index + 1) == Some(&b'-') && matches!(significant, b'{' | b';') => {
                 if let Some((name, after)) = property_at(text, index) {
-                    let note = notes.entry(name.clone()).or_default();
+                    let note = note_for(notes, name);
                     if note.group.is_none()
                         && let Some(group) = &section
                     {
@@ -2137,8 +2205,20 @@ fn collect_notes(text: &str, notes: &mut BTreeMap<String, Note>) {
     }
 }
 
+/// The note of `name`, made if the theme has none yet. The name is cloned
+/// only when it is not a key yet: a theme names its properties once, but
+/// says them again and again.
+fn note_for<'a>(notes: &'a mut BTreeMap<String, Note>, name: &str) -> &'a mut Note {
+    use std::collections::btree_map::Entry;
+    match notes.entry(name.to_owned()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(Note::default()),
+    }
+}
+
 /// The custom property starting at `start`, with the byte after its colon.
-fn property_at(text: &str, start: usize) -> Option<(String, usize)> {
+/// The name is a piece of the text, not a copy of it.
+fn property_at(text: &str, start: usize) -> Option<(&str, usize)> {
     let bytes = text.as_bytes();
     let mut index = start + 2;
     let name_start = index;
@@ -2150,11 +2230,12 @@ fn property_at(text: &str, start: usize) -> Option<(String, usize)> {
     if index == name_start {
         return None;
     }
-    let name = &text[name_start..index];
+    // The name keeps its `--`, as the theme writes it.
+    let name = &text[start..index];
     while index < bytes.len() && bytes[index].is_ascii_whitespace() {
         index += 1;
     }
-    (bytes.get(index) == Some(&b':')).then(|| (format!("--{name}"), index + 1))
+    (bytes.get(index) == Some(&b':')).then(|| (name, index + 1))
 }
 
 /// What one `/* ... */` comment says: a description, a section, or both.
@@ -2513,8 +2594,12 @@ fn percent_decode(text: &str) -> Vec<u8> {
 }
 
 /// Removes comments, keeping line breaks and string contents.
-/// `text` without its comments, and whether one was left open.
-fn strip_comments(text: &str) -> (String, bool) {
+/// `text` without its comments, and whether one was left open. A file
+/// without a comment is borrowed, not copied.
+fn strip_comments(text: &str) -> (Cow<'_, str>, bool) {
+    if !text.contains("/*") {
+        return (Cow::Borrowed(text), false);
+    }
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut quote: Option<char> = None;
@@ -2556,47 +2641,36 @@ fn strip_comments(text: &str) -> (String, bool) {
             _ => out.push(character),
         }
     }
-    (out, open)
+    (Cow::Owned(out), open)
 }
 
-/// `prefers-color-scheme: dark` and its light sibling in a media query.
+/// The colour scheme a media query list asks for.
+///
+/// A list is true when one of its queries is true, and each query is
+/// settled against an appearance: a query that asks for a scheme is true
+/// for that appearance only. The scheme of the list is the one of the first
+/// query that is true, so a list that is true for both appearances asks for
+/// neither. `None` means the list asks for no scheme, and its rules apply
+/// to both.
 fn media_scheme(prelude: &str) -> Option<bool> {
     let query = media_query_text(prelude);
-    let mut required = None;
-    for branch in crate::color::split_top(query, ',') {
-        if !media_query_could_apply(branch) {
-            continue;
-        }
-        let scheme = media_query_scheme(branch)?;
-        match required {
-            None => required = Some(scheme),
-            Some(known) if known == scheme => {}
-            Some(_) => return None,
-        }
+    if query.is_empty() {
+        return None;
     }
-    required.flatten()
-}
-
-/// The appearance one media query asks for; `None` when it applies to both.
-fn media_query_scheme(query: &str) -> Option<Option<bool>> {
-    let lower = query.to_ascii_lowercase();
-    let at = lower.find("prefers-color-scheme")?;
-    let after = &lower[at + "prefers-color-scheme".len()..];
-    let after = after.trim_start().strip_prefix(':')?.trim_start();
-    let (value, _) = split_first_word(after);
-    let value = value.trim_matches([')', ';', ' ']);
-    let dark = match value {
-        "dark" => true,
-        "light" => false,
-        _ => return Some(None),
-    };
-    let prefix = lower[..at].trim_end();
-    let prefix = prefix.strip_suffix('(').unwrap_or(prefix).trim_end();
-    let negated = prefix
-        .rsplit_once(' ')
-        .is_some_and(|(_, word)| word.eq_ignore_ascii_case("not"))
-        || prefix.eq_ignore_ascii_case("not");
-    Some(Some(dark != negated))
+    let branches = crate::color::split_top(query, ',');
+    let dark = branches
+        .iter()
+        .any(|branch| media_query_applies_for(branch, Some(true)));
+    let light = branches
+        .iter()
+        .any(|branch| media_query_applies_for(branch, Some(false)));
+    match (dark, light) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        // A list that is true for both appearances asks for no scheme, and
+        // one that is true for neither is left out by `media_applies`.
+        _ => None,
+    }
 }
 
 /// The largest a value may grow to while its `var()`s are filled in. A
@@ -2607,19 +2681,108 @@ const MAX_RESOLVED: usize = 1 << 20;
 /// How many `var()`s one value may read, across all its levels.
 const SUBSTITUTIONS: usize = 4096;
 
+/// One custom property: its value, and what the cascade needs to keep it.
+#[derive(Clone, Debug)]
+struct Var {
+    /// The value as written, before its `var()`s are filled in.
+    value: String,
+    /// Whether the winning declaration carried `!important`.
+    important: bool,
+    /// The weight that won: the layer and the specificity packed in it,
+    /// with the source order.
+    weight: (u32, usize),
+    /// The folder or web address the value came from, for the files it
+    /// names relatively.
+    origin: Option<String>,
+}
+
 /// Resolves custom properties and the colours that use them.
 #[derive(Clone, Debug, Default)]
 pub struct Vars {
-    values: BTreeMap<String, String>,
-    important: BTreeMap<String, bool>,
-    /// The specificity and source order that won each property.
-    weight: BTreeMap<String, (u32, usize)>,
-    /// The folder or web address each property came from, for the files it
-    /// names relatively.
-    origin: BTreeMap<String, Option<String>>,
+    /// Every custom property the theme names, by name.
+    values: BTreeMap<String, Var>,
     /// Values already filled in, so a palette and the options that name the
-    /// same variables resolve each chain once.
-    resolved: RefCell<HashMap<String, Option<String>>>,
+    /// same variables resolve each chain once. The cache is shared with the
+    /// copies of a `Vars`, so a copy costs nothing.
+    resolved: Arc<RefCell<ResolutionCache>>,
+}
+
+/// The values already filled in, and what they hold.
+#[derive(Debug, Default)]
+struct ResolutionCache {
+    /// The resolved values, by the text that named them.
+    entries: HashMap<String, Option<String>>,
+    /// The bytes the entries hold.
+    bytes: usize,
+}
+
+impl ResolutionCache {
+    /// The bytes the cache may hold at once. A theme's values are far below
+    /// this; one that fills it starts again rather than grow.
+    const LIMIT: usize = 8 << 20;
+
+    /// Keeps a resolution.
+    fn remember(&mut self, key: String, value: Option<String>) {
+        let size = key.len() + value.as_ref().map_or(0, |value| value.len());
+        if size > Self::LIMIT {
+            // A value too big to keep is not worth the room.
+            return;
+        }
+        if self.bytes + size > Self::LIMIT {
+            self.entries.clear();
+            self.bytes = 0;
+        }
+        self.bytes += size;
+        self.entries.insert(key, value);
+    }
+
+    /// Drops what the write of `name` made stale: a value that names the
+    /// written variable would otherwise keep the old one.
+    fn forget(&mut self, name: &str) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.entries.retain(|key, _| !key.contains(name));
+        self.bytes = self
+            .entries
+            .iter()
+            .map(|(key, value)| key.len() + value.as_ref().map_or(0, |value| value.len()))
+            .sum();
+    }
+}
+
+/// The weight a declaration carries in the cascade: the layer it sits in,
+/// packed above the selector's specificity.
+///
+/// A rule outside every layer outranks every layered rule, and the
+/// specificity never reaches a layer's stride, so the two can be told
+/// apart. This is the packing [`Vars::insert_weighted`] reads back.
+pub fn layer_weight(layer: Option<u32>, specificity: u32) -> u32 {
+    let layer = layer.map_or(UNLAYERED_WEIGHT, |rank| {
+        rank.saturating_add(1).saturating_mul(LAYER_STRIDE)
+    });
+    layer.saturating_add(specificity.min(LAYER_STRIDE - 1))
+}
+
+/// The layer and the specificity packed into a weight.
+fn unpack_weight(weight: u32) -> (u32, u32) {
+    let specificity = weight % LAYER_STRIDE;
+    (weight - specificity, specificity)
+}
+
+/// Whether an important declaration beats the one the theme already has.
+///
+/// CSS Cascade 5 §6.4.3: among important declarations the layer order is
+/// reversed, so an earlier layer wins, and a rule outside every layer is
+/// the weakest of them. Within a layer the specificity decides, and then
+/// the source order.
+fn important_wins(weight: u32, order: usize, old_weight: u32, old_order: usize) -> bool {
+    let (layer, specificity) = unpack_weight(weight);
+    let (old_layer, old_specificity) = unpack_weight(old_weight);
+    // The layer is read backwards; within a layer the specificity and then
+    // the source order decide forwards, as they do for an ordinary rule.
+    (std::cmp::Reverse(layer), specificity, order)
+        >= (std::cmp::Reverse(old_layer), old_specificity, old_order)
 }
 
 impl Vars {
@@ -2628,25 +2791,29 @@ impl Vars {
     pub fn insert(&mut self, declaration: &Declaration) {
         let replace = !matches!(
             (
-                self.important.get(&declaration.name).copied(),
+                self.values.get(&declaration.name).map(|var| var.important),
                 declaration.important
             ),
             (Some(true), false)
         );
         if replace {
-            self.values
-                .insert(declaration.name.clone(), declaration.value.clone());
-            self.important
-                .insert(declaration.name.clone(), declaration.important);
-            self.weight
-                .insert(declaration.name.clone(), (u32::MAX, usize::MAX));
-            self.origin.insert(declaration.name.clone(), None);
-            self.resolved.borrow_mut().clear();
+            self.values.insert(
+                declaration.name.clone(),
+                Var {
+                    value: declaration.value.clone(),
+                    important: declaration.important,
+                    weight: (u32::MAX, usize::MAX),
+                    origin: None,
+                },
+            );
+            self.resolved.borrow_mut().forget(&declaration.name);
         }
     }
 
     /// Writes a declaration in the theme's cascade. `!important` beats
-    /// specificity beats source order, as in a browser.
+    /// specificity beats source order, as in a browser, and the weight
+    /// carries the layer the declaration sits in, as
+    /// [`layer_weight`] packs it.
     pub fn insert_weighted(
         &mut self,
         declaration: &Declaration,
@@ -2654,41 +2821,52 @@ impl Vars {
         order: usize,
         origin: Option<&str>,
     ) {
-        let old_important = self.important.get(&declaration.name).copied();
-        let replace = match (old_important, declaration.important) {
+        let old = self
+            .values
+            .get(&declaration.name)
+            .map(|var| (var.important, var.weight));
+        let replace = match (old.map(|old| old.0), declaration.important) {
+            // An important declaration in the theme holds off an ordinary
+            // one, and an override the caller chose.
             (Some(true), false) => false,
+            // An important declaration beats an ordinary one.
             (Some(false), true) | (None, true) => true,
+            // Two important declarations: the earlier layer wins.
+            (Some(true), true) => {
+                let old_weight = old.map_or((0, 0), |old| old.1);
+                important_wins(specificity, order, old_weight.0, old_weight.1)
+            }
+            // Two ordinary declarations: the layer, then the specificity,
+            // then the source order. The weight carries the layer above the
+            // specificity, so comparing the weights compares both.
             _ => {
-                let (old_specificity, old_order) = self
-                    .weight
-                    .get(&declaration.name)
-                    .copied()
-                    .unwrap_or((0, 0));
-                (specificity, order) >= (old_specificity, old_order)
+                let old_weight = old.map_or((0, 0), |old| old.1);
+                (specificity, order) >= old_weight
             }
         };
         if replace {
-            self.values
-                .insert(declaration.name.clone(), declaration.value.clone());
-            self.important
-                .insert(declaration.name.clone(), declaration.important);
-            self.weight
-                .insert(declaration.name.clone(), (specificity, order));
-            self.origin
-                .insert(declaration.name.clone(), origin.map(str::to_owned));
-            self.resolved.borrow_mut().clear();
+            self.values.insert(
+                declaration.name.clone(),
+                Var {
+                    value: declaration.value.clone(),
+                    important: declaration.important,
+                    weight: (specificity, order),
+                    origin: origin.map(str::to_owned),
+                },
+            );
+            self.resolved.borrow_mut().forget(&declaration.name);
         }
     }
 
     /// The folder or web address `name` came from, for the files it names
     /// relatively.
     pub fn origin(&self, name: &str) -> Option<&str> {
-        self.origin.get(name).and_then(Option::as_deref)
+        self.values.get(name).and_then(|var| var.origin.as_deref())
     }
 
     /// The value `name` settled to, before its `var()`s are filled in.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values.get(name).map(|var| var.value.as_str())
     }
 
     /// Whether the theme names `name` at all, whatever its value.
@@ -2700,7 +2878,7 @@ impl Vars {
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values
             .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .map(|(name, var)| (name.as_str(), var.value.as_str()))
     }
 
     /// `value` with every `var()` replaced, or `None` when one has neither a
@@ -2710,17 +2888,15 @@ impl Vars {
         if find_ignore_case(value, "var(").is_none() {
             return Some(Cow::Borrowed(value));
         }
-        if let Some(cached) = self.resolved.borrow().get(value) {
+        if let Some(cached) = self.resolved.borrow().entries.get(value) {
             return cached.clone().map(Cow::Owned);
         }
         let mut left = SUBSTITUTIONS;
         let result = self.resolve_depth(value, 0, &mut left);
         if value.len() <= 4096 {
-            let mut cache = self.resolved.borrow_mut();
-            if cache.len() >= 1024 {
-                cache.clear();
-            }
-            cache.insert(value.to_owned(), result.clone());
+            self.resolved
+                .borrow_mut()
+                .remember(value.to_owned(), result.clone());
         }
         result.map(Cow::Owned)
     }
@@ -2762,6 +2938,7 @@ impl Vars {
             let resolved = self
                 .values
                 .get(name)
+                .map(|var| var.value.as_str())
                 .and_then(|value| self.resolve_depth(value, depth + 1, left))
                 .or_else(|| {
                     arguments
@@ -2970,35 +3147,206 @@ fn without_negations(selector: &str) -> String {
     out
 }
 
-/// A rough CSS specificity: ids, classes/attributes/pseudo-classes, tags.
-/// Root selectors rarely need more than ordering ties by source order.
+/// A selector's specificity, as CSS counts it: the ids, then the classes,
+/// attributes and pseudo-classes, then the type selectors and
+/// pseudo-elements.
+///
+/// The three counts sit in three fields of one number, so none of them can
+/// carry into the next: eleven classes stay below one id, and one class
+/// stays below the field the type selectors take. A count that does not fit
+/// its field stops there.
 fn specificity(selector: &str) -> u32 {
-    let mut specificity = 0;
-    for compound in selector_compounds(selector) {
-        let bytes = compound.as_bytes();
-        let mut index = 0;
-        if bytes.first().is_some_and(u8::is_ascii_alphabetic) {
-            specificity += 1;
-        }
-        while index < bytes.len() {
-            match bytes[index] {
-                b'#' => {
-                    specificity += 100;
-                    index += 1;
+    selector_counts(selector).packed()
+}
+
+/// The bits a count of ids takes in a packed specificity.
+const ID_BITS: u32 = 3;
+
+/// The bits a count of classes takes in a packed specificity.
+const CLASS_BITS: u32 = 8;
+
+/// The bits a count of type selectors takes in a packed specificity.
+const TYPE_BITS: u32 = 8;
+
+/// The three counts a selector's specificity holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Specificity {
+    /// The ids (`#name`).
+    ids: u32,
+    /// The classes (`.name`), the attributes (`[name]`) and the
+    /// pseudo-classes (`:name`).
+    classes: u32,
+    /// The type selectors (`name`) and the pseudo-elements (`::name`).
+    types: u32,
+}
+
+impl Specificity {
+    /// Whether these counts beat or equal `other`'s, as CSS compares them:
+    /// the ids first, then the classes, then the type selectors.
+    fn at_least(self, other: Self) -> bool {
+        (self.ids, self.classes, self.types) >= (other.ids, other.classes, other.types)
+    }
+
+    /// The most specific of two counts.
+    fn most(left: Self, right: Self) -> Self {
+        if right.at_least(left) { right } else { left }
+    }
+
+    /// The counts packed into the one number the cascade compares.
+    fn packed(self) -> u32 {
+        let ids = self.ids.min((1 << ID_BITS) - 1);
+        let classes = self.classes.min((1 << CLASS_BITS) - 1);
+        let types = self.types.min((1 << TYPE_BITS) - 1);
+        (ids << (CLASS_BITS + TYPE_BITS)) | (classes << TYPE_BITS) | types
+    }
+}
+
+/// The counts a selector holds. A rule inside `:is()`, `:not()` or `:has()`
+/// takes the counts of its most specific argument, and `:where()` and what
+/// it holds take none. An attribute's value never counts.
+fn selector_counts(selector: &str) -> Specificity {
+    let mut counts = Specificity::default();
+    let bytes = selector.as_bytes();
+    let mut index = 0;
+    // A type selector is the first thing in a compound; what follows a
+    // class or a pseudo-class is not one.
+    let mut compound_start = true;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'#' => {
+                counts.ids += 1;
+                index = skip_name(bytes, index + 1);
+                compound_start = false;
+            }
+            b'.' => {
+                counts.classes += 1;
+                index = skip_name(bytes, index + 1);
+                compound_start = false;
+            }
+            b'[' => {
+                // An attribute counts once. Its value never counts, so
+                // `[href="#x"]` is a class and not an id.
+                counts.classes += 1;
+                index = skip_group(bytes, index, b'[', b']');
+                compound_start = false;
+            }
+            b':' => {
+                let element = bytes.get(index + 1) == Some(&b':');
+                let name_start = index + if element { 2 } else { 1 };
+                let name_end = skip_name(bytes, name_start);
+                let name = selector
+                    .get(name_start..name_end)
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                index = name_end;
+                match name.as_str() {
+                    // The most specific argument speaks for the list.
+                    "is" | "not" | "has" | "matches" if !element => {
+                        let (end, arguments) = pseudo_arguments(selector, index);
+                        index = end;
+                        let mut best = Specificity::default();
+                        for argument in arguments {
+                            best = Specificity::most(best, selector_counts(argument));
+                        }
+                        counts.ids += best.ids;
+                        counts.classes += best.classes;
+                        counts.types += best.types;
+                    }
+                    // `:where()` and what it holds take nothing.
+                    "where" if !element => {
+                        let (end, _) = pseudo_arguments(selector, index);
+                        index = end;
+                    }
+                    _ => {
+                        if element {
+                            counts.types += 1;
+                        } else {
+                            counts.classes += 1;
+                        }
+                        // A pseudo-class's own argument is not a selector, so
+                        // it counts for nothing.
+                        if bytes.get(index) == Some(&b'(') {
+                            index = skip_group(bytes, index, b'(', b')');
+                        }
+                    }
                 }
-                b'.' | b'[' => {
-                    specificity += 10;
-                    index += 1;
+                compound_start = false;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b',' | b'>' | b'+' | b'~' => {
+                index += 1;
+                compound_start = true;
+            }
+            b'*' => {
+                // The universal selector counts for nothing.
+                index += 1;
+                compound_start = false;
+            }
+            _ => {
+                if compound_start {
+                    counts.types += 1;
                 }
-                b':' if bytes.get(index + 1) != Some(&b':') => {
-                    specificity += 10;
-                    index += 1;
-                }
-                _ => index += 1,
+                index = skip_name(bytes, index);
+                compound_start = false;
             }
         }
     }
-    specificity
+    counts
+}
+
+/// The byte after the name starting at `start`. It always moves on, so a
+/// name that is not one cannot stop the reader.
+fn skip_name(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() && identifier_byte(bytes[index]) {
+        index += 1;
+    }
+    if index == start && start < bytes.len() {
+        index += 1;
+    }
+    index
+}
+
+/// The byte after the bracketed group that starts at `start`.
+fn skip_group(bytes: &[u8], start: usize, open: u8, close: u8) -> usize {
+    let mut depth = 0u32;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    for (offset, &byte) in bytes.iter().enumerate().skip(start) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' | b'\'' if quote == Some(byte) => quote = None,
+            b'"' | b'\'' if quote.is_none() => quote = Some(byte),
+            byte if quote.is_none() && byte == open => depth += 1,
+            byte if quote.is_none() && byte == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return offset + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    bytes.len()
+}
+
+/// The arguments of a functional pseudo-class, and the byte after them.
+fn pseudo_arguments(selector: &str, index: usize) -> (usize, Vec<&str>) {
+    let bytes = selector.as_bytes();
+    if bytes.get(index) != Some(&b'(') {
+        return (index, Vec::new());
+    }
+    let end = skip_group(bytes, index, b'(', b')');
+    let close = end.saturating_sub(1);
+    let inside = if bytes.get(close) == Some(&b')') {
+        selector.get(index + 1..close).unwrap_or("")
+    } else {
+        selector.get(index + 1..end).unwrap_or("")
+    };
+    (end, crate::color::split_top(inside, ','))
 }
 
 /// Splits a selector at its combinators, keeping the pieces that matter.
@@ -3315,6 +3663,83 @@ mod tests {
             important: false,
         });
         assert_eq!(vars.get("--x"), Some("red"));
+    }
+
+    #[test]
+    fn an_important_rule_in_an_earlier_layer_wins() {
+        // CSS Cascade 5 §6.4.3: among important declarations the layer
+        // order is reversed, so the first layer wins; a rule outside every
+        // layer is the weakest of them.
+        let declare = |vars: &mut Vars, value: &str, layer: Option<u32>, order: usize| {
+            vars.insert_weighted(
+                &Declaration {
+                    name: "--x".into(),
+                    value: value.into(),
+                    important: true,
+                },
+                layer_weight(layer, 10),
+                order,
+                None,
+            );
+        };
+        let mut vars = Vars::default();
+        declare(&mut vars, "later layer", Some(1), 0);
+        declare(&mut vars, "first layer", Some(0), 1);
+        declare(&mut vars, "outside any layer", None, 2);
+        assert_eq!(vars.get("--x"), Some("first layer"));
+
+        // And an ordinary rule outside every layer beats every layer, as it
+        // did before.
+        let mut vars = Vars::default();
+        vars.insert_weighted(
+            &Declaration {
+                name: "--x".into(),
+                value: "in a layer".into(),
+                important: false,
+            },
+            layer_weight(Some(9), 10),
+            0,
+            None,
+        );
+        vars.insert_weighted(
+            &Declaration {
+                name: "--x".into(),
+                value: "outside".into(),
+                important: false,
+            },
+            layer_weight(None, 10),
+            1,
+            None,
+        );
+        assert_eq!(vars.get("--x"), Some("outside"));
+    }
+
+    #[test]
+    fn specificity_still_decides_inside_one_important_layer() {
+        // Only the layer order reverses for an important declaration: within
+        // a layer a more specific rule still wins, and then the later one.
+        let mut vars = Vars::default();
+        vars.insert_weighted(
+            &Declaration {
+                name: "--x".into(),
+                value: "less specific, later".into(),
+                important: true,
+            },
+            layer_weight(Some(0), 10),
+            1,
+            None,
+        );
+        vars.insert_weighted(
+            &Declaration {
+                name: "--x".into(),
+                value: "more specific, earlier".into(),
+                important: true,
+            },
+            layer_weight(Some(0), 100),
+            0,
+            None,
+        );
+        assert_eq!(vars.get("--x"), Some("more specific, earlier"));
     }
 
     #[test]
