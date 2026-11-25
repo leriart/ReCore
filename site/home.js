@@ -13,46 +13,46 @@
     // limited or offline. The API replaces it as soon as it loads; bump this
     // block with scripts/set-version when a new stable release ships.
     const FALLBACK_RELEASE = {
-        tag_name: "v0.5.6",
-        name: "ReCore 0.5.6",
-        html_url: "https://github.com/leriart/ReCore/releases/tag/v0.5.6",
-        published_at: "2026-11-23T20:31:40Z",
+        tag_name: "v0.5.7",
+        name: "ReCore 0.5.7",
+        html_url: "https://github.com/leriart/ReCore/releases/tag/v0.5.7",
+        published_at: "2026-11-25T05:44:02Z",
         assets: [
             {
-                name: "ReCore-0.5.6-windows-x64.zip",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-windows-x64.zip"
+                name: "ReCore-0.5.7-windows-x64.zip",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-windows-x64.zip"
             },
             {
-                name: "ReCore-0.5.6-x86_64.AppImage",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-x86_64.AppImage"
+                name: "ReCore-0.5.7-x86_64.AppImage",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-x86_64.AppImage"
             },
             {
-                name: "recore-0.5.6-1-x86_64.pkg.tar.zst",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/recore-0.5.6-1-x86_64.pkg.tar.zst"
+                name: "recore-0.5.7-1-x86_64.pkg.tar.zst",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/recore-0.5.7-1-x86_64.pkg.tar.zst"
             },
             {
-                name: "ReCore-0.5.6-macos-arm64.dmg",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-macos-arm64.dmg"
+                name: "ReCore-0.5.7-macos-arm64.dmg",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-macos-arm64.dmg"
             },
             {
-                name: "ReCore-0.5.6-macos-arm64.zip",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-macos-arm64.zip"
+                name: "ReCore-0.5.7-macos-arm64.zip",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-macos-arm64.zip"
             },
             {
-                name: "ReCore-0.5.6-macos-x64.dmg",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-macos-x64.dmg"
+                name: "ReCore-0.5.7-macos-x64.dmg",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-macos-x64.dmg"
             },
             {
-                name: "ReCore-0.5.6-macos-x64.zip",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-macos-x64.zip"
+                name: "ReCore-0.5.7-macos-x64.zip",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-macos-x64.zip"
             },
             {
-                name: "ReCore-0.5.6-source.zip",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/ReCore-0.5.6-source.zip"
+                name: "ReCore-0.5.7-source.zip",
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/ReCore-0.5.7-source.zip"
             },
             {
                 name: "SHA256SUMS.txt",
-                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.6/SHA256SUMS.txt"
+                browser_download_url: "https://github.com/leriart/ReCore/releases/download/v0.5.7/SHA256SUMS.txt"
             }
         ]
     };

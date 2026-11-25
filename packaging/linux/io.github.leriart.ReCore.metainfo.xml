@@ -39,6 +39,7 @@
     <content_attribute id="social-contacts">intense</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.5.7" date="2026-11-24"/>
     <release version="0.5.6" date="2026-11-23"/>
     <release version="0.5.5" date="2026-11-21"/>
     <release version="0.5.4" date="2026-11-20"/>
