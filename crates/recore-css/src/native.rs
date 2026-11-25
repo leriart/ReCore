@@ -23,10 +23,14 @@ use crate::{
 /// How a region's text is transformed, as CSS's `text-transform`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextTransform {
+    /// Leaves the text as written.
     #[default]
     None,
+    /// Sets every letter in upper case.
     Uppercase,
+    /// Sets every letter in lower case.
     Lowercase,
+    /// Sets the first letter of each word in upper case.
     Capitalize,
 }
 
@@ -58,9 +62,13 @@ impl TextTransform {
 /// A `box-shadow` a theme gives a region, ready for the window's renderer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shadow {
+    /// The shadow's colour, straight alpha included.
     pub color: Rgba,
+    /// The horizontal offset in CSS pixels; positive moves it right.
     pub offset_x: f32,
+    /// The vertical offset in CSS pixels; positive moves it down.
     pub offset_y: f32,
+    /// The blur radius in CSS pixels; 0 is a hard edge.
     pub blur: f32,
 }
 
@@ -493,26 +501,44 @@ pub(crate) const NODES: [Node; 25] = [
 /// Appearance tile without introducing a second theme model.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NativeStyle {
+    /// The guild rail's ground.
     pub rail: Option<Rgba>,
+    /// The channel sidebar's ground, category headings included.
     pub sidebar: Option<Rgba>,
+    /// The chat's ground, its message list and search results included.
     pub chat: Option<Rgba>,
     /// A linear gradient on the rail, the sidebar or the chat, which the
     /// window paints instead of the solid colour those fields keep as a
     /// fallback.
     pub rail_gradient: Option<crate::Gradient>,
+    /// A linear gradient on the sidebar, which outranks `sidebar`.
     pub sidebar_gradient: Option<crate::Gradient>,
+    /// A linear gradient on the chat, which outranks `chat`.
     pub chat_gradient: Option<crate::Gradient>,
+    /// The member list's and threads' ground.
     pub panel: Option<Rgba>,
+    /// The ground of raised surfaces: the header, a card or dialog, a menu
+    /// and the settings, inbox, profile and poll pages.
     pub raised: Option<Rgba>,
+    /// The composer's and its uploads' ground.
     pub field: Option<Rgba>,
+    /// A stage or call panel's ground.
     pub stage: Option<Rgba>,
+    /// A tooltip's ground.
     pub tooltip: Option<Rgba>,
+    /// The region's main ink, and the window's text where no region names one.
     pub text: Option<Rgba>,
+    /// The sidebar's ink, which is quieter than the window's text.
     pub secondary: Option<Rgba>,
+    /// The ink of category and member headings, quieter again.
     pub muted: Option<Rgba>,
+    /// The ground of a hovered region.
     pub hover: Option<Rgba>,
+    /// The wash a hovered message row takes.
     pub row_hover: Option<Rgba>,
+    /// The window's line colour, from a border or outline.
     pub line: Option<Rgba>,
+    /// The accent a field's caret or an accented control uses.
     pub accent: Option<Rgba>,
     /// The ground of selected text, as `::selection` names it.
     pub selection: Option<Rgba>,
@@ -520,6 +546,7 @@ pub struct NativeStyle {
     pub placeholder: Option<Rgba>,
     /// A scrollbar's thumb at rest and under the pointer.
     pub scrollbar: Option<Rgba>,
+    /// The scrollbar's thumb under the pointer.
     pub scrollbar_hover: Option<Rgba>,
     /// The shadow a menu, popout or tooltip asks for.
     pub raised_shadow: Option<Shadow>,
@@ -528,28 +555,46 @@ pub struct NativeStyle {
     /// How opaque a region's ground is, as `opacity` names it. Only the
     /// ground is faded; the window's text keeps its own ink.
     pub rail_opacity: Option<f32>,
+    /// The sidebar's ground opacity, 0..1.
     pub sidebar_opacity: Option<f32>,
+    /// The chat's ground opacity, 0..1.
     pub chat_opacity: Option<f32>,
+    /// The member list's and threads' ground opacity, 0..1.
     pub panel_opacity: Option<f32>,
+    /// The opacity of raised surfaces, 0..1.
     pub raised_opacity: Option<f32>,
+    /// The composer's ground opacity, 0..1.
     pub field_opacity: Option<f32>,
+    /// A stage panel's ground opacity, 0..1.
     pub stage_opacity: Option<f32>,
+    /// A tooltip's ground opacity, 0..1.
     pub tooltip_opacity: Option<f32>,
+    /// The window's corner radius in CSS pixels, from a region rule.
     pub radius: Option<f32>,
+    /// The family the page's `font-family` names, for the whole window.
     pub font_family: Option<String>,
+    /// The page's root size in CSS pixels.
     pub font_size: Option<f32>,
+    /// Extra space between letters in CSS pixels; the window reads it but
+    /// iced's text has no tracking setting to paint it.
     pub letter_spacing: Option<f32>,
     /// A channel list's category heading, a member list's group heading and
     /// the conversation's title, as their own rules name them.
     pub category_size: Option<f32>,
+    /// The case a category heading is drawn in.
     pub category_transform: Option<TextTransform>,
+    /// A member list's group heading size in CSS pixels.
     pub member_heading_size: Option<f32>,
+    /// The case a member list's group heading is drawn in.
     pub member_heading_transform: Option<TextTransform>,
+    /// The conversation title's size in CSS pixels.
     pub header_size: Option<f32>,
+    /// The case the conversation title is drawn in.
     pub header_transform: Option<TextTransform>,
     /// How long popups open for, and in how many steps, from a `transition`
     /// or `animation` on a menu, popout or dialog.
     pub motion_ms: Option<u32>,
+    /// How many steps the popup's opening motion moves in; 0 or 1 is a jump.
     pub motion_steps: Option<u32>,
 }
 

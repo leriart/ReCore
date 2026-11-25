@@ -13,10 +13,13 @@ use crate::{
 pub struct ThemeOption {
     /// The custom property, such as `--rl-accent`.
     pub name: String,
+    /// A readable name for the control, taken from the comment or the property.
     pub label: String,
+    /// The explanation the theme writes beside the property, when there is one.
     pub description: Option<String>,
     /// The heading it belongs under.
     pub group: String,
+    /// The control that edits it and the value as the theme holds it now.
     pub kind: OptionKind,
     /// The value as the theme writes it now, overrides included.
     pub value: String,
@@ -35,44 +38,62 @@ pub struct ThemeOption {
 /// What sort of value a theme option holds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OptionKind {
+    /// A colour, shown as a swatch with a picker and a hex field.
     Color {
         /// The resolved colour, which the swatch shows.
         color: Rgba,
     },
     /// A percentage, shown from 0 to 100.
     Percent {
+        /// The percentage, 0 to 100.
         value: f32,
         /// Whether the theme writes `25%` rather than `0.25`.
         percent: bool,
     },
     /// A length, a duration or another number with a unit.
     Number {
+        /// The number as the theme writes it.
         value: f32,
+        /// The unit that follows it, such as `px`, `rem` or `s`.
         unit: String,
     },
+    /// A switch between two values, such as `on` and `off`.
     Toggle {
+        /// Whether the option is currently on.
         on: bool,
+        /// The value written when the switch is on.
         on_value: String,
+        /// The value written when the switch is off.
         off_value: String,
     },
     /// A whole-number slider a BetterDiscord `@var slider` declares.
     Range {
+        /// The current value, between `min` and `max`.
         value: i32,
+        /// The lowest value the slider allows.
         min: i32,
+        /// The highest value the slider allows.
         max: i32,
+        /// How far one drag step moves the value.
         step: i32,
+        /// The unit shown beside the number, which may be empty.
         unit: String,
     },
+    /// One of a fixed list of values, shown as a menu.
     Choice {
         /// Each choice's label and the value the theme writes for it.
         choices: Vec<(String, String)>,
     },
     /// A picture, as a `url(...)` or `none`.
     Image {
+        /// The address the theme names, or `None` for no picture.
         url: Option<String>,
+        /// Whether the picture is a `data:` URI the theme carries itself.
         embedded: bool,
     },
+    /// A font family, shown as a text field with the known fonts offered.
     Font,
+    /// Free text the reader could not type more precisely.
     Text,
 }
 

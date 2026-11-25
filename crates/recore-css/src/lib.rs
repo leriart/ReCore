@@ -36,6 +36,8 @@
 //! assert_eq!(theme.palette.accent.hex(), "#e94221");
 //! ```
 
+#![deny(missing_docs)]
+
 mod base64;
 pub mod color;
 pub mod css;

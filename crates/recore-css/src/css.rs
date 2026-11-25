@@ -52,8 +52,11 @@ pub(crate) mod bounds {
 /// One declaration, and whether it carried `!important`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declaration {
+    /// The property's name as written, custom properties included.
     pub name: String,
+    /// The value as written, still holding any `var()` calls.
     pub value: String,
+    /// Whether the declaration ended in `!important`.
     pub important: bool,
 }
 
@@ -61,7 +64,9 @@ pub struct Declaration {
 /// it (whether they ask for a dark or a light colour scheme).
 #[derive(Clone, Debug, Default)]
 pub struct Rule {
+    /// The comma-separated selectors, each trimmed.
     pub selectors: Vec<String>,
+    /// The declarations in source order.
     pub declarations: Vec<Declaration>,
     /// `Some(true)` under `prefers-color-scheme: dark`, `Some(false)` under
     /// its light query, `None` under anything else.
@@ -83,6 +88,7 @@ pub struct Rule {
 pub struct Keyframe {
     /// Where the step sits in the animation, 0..1.
     pub offset: f32,
+    /// The properties this step sets.
     pub declarations: Vec<Declaration>,
 }
 
@@ -91,6 +97,7 @@ pub struct Keyframe {
 /// ground, and leaves DOM-only animations in the file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keyframes {
+    /// The animation's name, as `animation-name` writes it.
     pub name: String,
     /// Sorted by offset, with `from` and `to` as 0 and 1.
     pub frames: Vec<Keyframe>,
@@ -99,8 +106,11 @@ pub struct Keyframes {
 /// A font a theme carries or points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFace {
+    /// The family name the theme asks for, unquoted.
     pub family: String,
+    /// The font's weight, 100 to 900, defaulting to 400.
     pub weight: u16,
+    /// Whether the face is the family's italic cut.
     pub italic: bool,
     /// Pulled out of a `data:` URI, or read from the path beside the theme.
     pub data: Option<Vec<u8>>,
@@ -133,8 +143,11 @@ pub struct PropertySpec {
 /// What a stylesheet holds.
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
+    /// Every rule in source order, at-rules unwrapped.
     pub rules: Vec<Rule>,
+    /// The `@font-face` families the sheet names.
     pub fonts: Vec<FontFace>,
+    /// Notes about rules the reader could not use, one sentence each.
     pub warnings: Vec<String>,
     /// What themes' comments say about their custom properties, by name.
     pub notes: BTreeMap<String, Note>,
@@ -172,6 +185,7 @@ impl Stylesheet {
 /// A parse failure; the loader keeps what came before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
+    /// The sentence shown to the person, naming what could not be read.
     pub message: String,
 }
 
@@ -2672,10 +2686,12 @@ impl Vars {
         self.origin.get(name).and_then(Option::as_deref)
     }
 
+    /// The value `name` settled to, before its `var()`s are filled in.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Whether the theme names `name` at all, whatever its value.
     pub fn contains(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }
@@ -2768,9 +2784,9 @@ impl Vars {
 }
 
 /// The resolved custom properties a palette reads. [`Vars`] applies the
-/// theme's own root cascade; [`crate::semantic::SemanticVars`] reads the
-/// computed style the CSS engine settled, so a palette can be built from
-/// either without copying its values.
+/// theme's own root cascade; the semantic reader takes the computed style the
+/// CSS engine settled, so a palette can be built from either without copying
+/// its values.
 pub trait Variables {
     /// The value `name` settled to, before `var()` substitution.
     fn get(&self, name: &str) -> Option<&str>;
@@ -3057,12 +3073,19 @@ pub struct MetaVar {
 /// The theme's header comment, which Vencord themes use as metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Meta {
+    /// The theme's name, from `@name`.
     pub name: Option<String>,
+    /// Who wrote it, from `@author`.
     pub author: Option<String>,
+    /// Its one-line summary, from `@description`.
     pub description: Option<String>,
+    /// Its version string, from `@version`.
     pub version: Option<String>,
+    /// The licence it is offered under, from `@license`.
     pub license: Option<String>,
+    /// Where its source lives, from `@source`.
     pub source: Option<String>,
+    /// The theme's home page, from `@website`.
     pub website: Option<String>,
     /// BetterDiscord's `@var` settings, which name and explain some options.
     pub vars: Vec<MetaVar>,
@@ -3111,6 +3134,8 @@ fn before_first_rule(css: &str) -> &str {
 }
 
 impl Meta {
+    /// Reads the metadata comments before `css`'s first rule. Blocks may be
+    /// several, and a licence banner may come before the `@name` block.
     pub fn read(css: &str) -> Self {
         let mut meta = Self::default();
         // Metadata lives in the comments before the first rule. A license

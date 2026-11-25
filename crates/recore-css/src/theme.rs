@@ -47,29 +47,42 @@ pub enum Mode {
     /// The theme's own root colours decide, or the desktop's appearance.
     #[default]
     Auto,
+    /// Read the theme's dark palette, whatever the desktop shows.
     Dark,
+    /// Read the theme's light palette, whatever the desktop shows.
     Light,
 }
 
 /// How much motion the theme asks for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Motion {
+    /// Every animation and transition the window paints runs.
     #[default]
     Full,
+    /// Motion is kept but shortened and quieted.
     Subtle,
+    /// Nothing moves.
     Off,
 }
 
 /// The ReCord CRT effects a theme names, from 0 to 1.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effects {
+    /// How strong the scanlines are, 0 (off) to 1.
     pub scanlines: f32,
+    /// How much film grain sits over the window, 0 to 1.
     pub grain: f32,
+    /// How far the vignette darkens the window's edges, 0 to 1.
     pub vignette: f32,
+    /// Whether the picture flickers as a CRT would.
     pub flicker: bool,
+    /// Whether a bright beam sweeps the window.
     pub beam: bool,
+    /// How visible the screen's frame is, 0 to 1.
     pub frame: f32,
+    /// A CSS `filter` applied to avatars, kept as the filter's text.
     pub avatar_filter: Option<String>,
+    /// How strong the scanlines over avatars are, 0 to 1.
     pub avatar_scanline: f32,
 }
 
@@ -106,12 +119,16 @@ pub enum Image {
 pub enum GradientKind {
     /// Degrees, as CSS names them: 0 points up, 90 to the right.
     Linear(f32),
+    /// Radiating from the centre, or from the position the gradient names.
     Radial,
+    /// Sweeping around the centre, as a colour wheel does.
     Conic,
 }
 
+/// One colour stop of a gradient.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GradientStop {
+    /// The stop's colour.
     pub color: Rgba,
     /// The stop's position, 0..1, or `None` to distribute it evenly.
     pub position: Option<f32>,
@@ -120,7 +137,9 @@ pub struct GradientStop {
 /// A `linear-gradient()`, `radial-gradient()` or `conic-gradient()`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gradient {
+    /// How the gradient runs across the window.
     pub kind: GradientKind,
+    /// The stops in the order the CSS names them.
     pub stops: Vec<GradientStop>,
 }
 
@@ -185,18 +204,25 @@ impl Gradient {
 /// A font a theme carries, ready for the window's font system.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Font {
+    /// The family name the theme asks for.
     pub family: String,
+    /// The font's weight, 100 to 900, defaulting to 400.
     pub weight: u16,
+    /// Whether the face is the family's italic cut.
     pub italic: bool,
+    /// The font file's bytes, ready for the window's font system.
     pub bytes: Vec<u8>,
 }
 
 /// How a background picture fills the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackgroundFit {
+    /// Scales the picture to cover the window, cropping what overflows.
     #[default]
     Cover,
+    /// Scales the picture to fit inside the window, leaving gaps around it.
     Contain,
+    /// Stretches the picture to the window's exact shape.
     Fill,
 }
 
@@ -205,28 +231,41 @@ pub enum BackgroundFit {
 /// theme asks for when nobody has.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PageLayout {
+    /// The guild rail's width in CSS pixels.
     pub rail: f32,
+    /// The channel sidebar's width in CSS pixels.
     pub sidebar: f32,
+    /// The chat's width in CSS pixels.
     pub chat: f32,
+    /// The member list's width in CSS pixels.
     pub members: f32,
 }
 
 /// What a theme asks of the window besides its colours.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Look {
+    /// The family the page's root `font-family` names.
     pub font_family: Option<String>,
+    /// The page's root text size in CSS pixels.
     pub font_size: Option<f32>,
+    /// Extra space between letters in CSS pixels, read but not painted.
     pub letter_spacing: Option<f32>,
+    /// The window's corner radius in CSS pixels.
     pub radius: Option<f32>,
     /// The window's ground behind the gaps between panels.
     pub frame: Option<Rgba>,
     /// The space between the window's panels, and their corner radius, as
     /// themes like Ryoku and Midnight lay them out.
     pub panel_gap: Option<f32>,
+    /// The corner radius of those panels, in CSS pixels.
     pub panel_radius: Option<f32>,
+    /// How much movement the theme asks for.
     pub motion: Motion,
+    /// Whether icons are drawn at whole pixels, as a pixel-art theme wants.
     pub pixel_icons: bool,
+    /// The ReCord CRT effects the theme names.
     pub effects: Effects,
+    /// The picture or gradient behind the window's panels.
     pub background: Option<Image>,
     /// How far the background picture is dimmed, 0..1.
     pub background_dim: Option<f32>,
@@ -245,30 +284,44 @@ pub struct Look {
 /// One step of a colour or opacity animation ReCore can paint.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AnimationFrame {
+    /// Where the step sits in the animation, 0..1.
     pub offset: f32,
+    /// The window's ground at this step, when the animation sets one.
     pub background: Option<Rgba>,
+    /// The window's ink at this step, when the animation sets one.
     pub color: Option<Rgba>,
+    /// The window's opacity at this step, 0..1.
     pub opacity: Option<f32>,
 }
 
 /// A `@keyframes` animation on the window's own root or body.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Animation {
+    /// The `@keyframes` name the root or body rule asked for.
     pub name: String,
+    /// One cycle's length in seconds.
     pub duration: f32,
+    /// How long the animation waits before it starts, in seconds.
     pub delay: f32,
     /// `None` is CSS's infinite.
     pub iterations: Option<f32>,
+    /// Which way each cycle runs.
     pub direction: AnimationDirection,
+    /// The steps in the order they were read.
     pub frames: Vec<AnimationFrame>,
 }
 
+/// The direction a `@keyframes` animation runs in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AnimationDirection {
+    /// Runs from the first step to the last, every cycle.
     #[default]
     Normal,
+    /// Runs from the last step back to the first.
     Reverse,
+    /// Turns around at each end.
     Alternate,
+    /// Turns around at each end, starting from the last step.
     AlternateReverse,
 }
 
@@ -353,58 +406,109 @@ fn mix_value(left: Option<f32>, right: Option<f32>, mix: f32) -> Option<f32> {
 /// names are the ones `recore_core::theme::Theme` uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
+    /// Whether these colours make a dark theme.
     pub dark: bool,
+    /// The guild rail's ground.
     pub rail: Rgba,
+    /// The channel sidebar's ground.
     pub sidebar: Rgba,
+    /// The member list's and other secondary panels' ground.
     pub panel: Rgba,
+    /// The conversation's ground.
     pub chat: Rgba,
+    /// A stage or call panel's ground.
     pub stage: Rgba,
+    /// Floating surfaces: menus, dialogs, cards and popouts.
     pub raised: Rgba,
+    /// Inputs, the composer and other fields.
     pub field: Rgba,
+    /// The deepest wells, such as code blocks.
     pub sunken: Rgba,
+    /// A control's ground under the pointer.
     pub hover: Rgba,
+    /// A control's ground while pressed or selected.
     pub active: Rgba,
+    /// The wash a hovered message row takes.
     pub row_hover: Rgba,
+    /// The window's one-pixel separators.
     pub line: Rgba,
+    /// The border around a floating surface.
     pub edge: Rgba,
+    /// A general border.
     pub outline: Rgba,
+    /// The border around the chat.
     pub outline_chat: Rgba,
+    /// The border around an input field.
     pub outline_field: Rgba,
+    /// The main ink.
     pub text: Rgba,
+    /// Quieter ink for labels and headings.
     pub secondary: Rgba,
+    /// Quieter still, for metadata.
     pub muted: Rgba,
+    /// The faintest ink, for disabled or hint text.
     pub faint: Rgba,
+    /// The brand colour controls and links use.
     pub accent: Rgba,
+    /// The accent under the pointer.
     pub accent_hover: Rgba,
+    /// The ink that reads on the accent.
     pub on_accent: Rgba,
+    /// A translucent accent, for selected rows and soft highlights.
     pub accent_soft: Rgba,
+    /// The colour of an error or a destructive action.
     pub danger: Rgba,
+    /// The danger colour under the pointer.
     pub danger_hover: Rgba,
+    /// The ink that reads on the danger colour.
     pub on_danger: Rgba,
+    /// The green of an online person or a live call.
     pub live: Rgba,
+    /// The amber of a warning or an emphasised label.
     pub loud: Rgba,
+    /// The colour of a link.
     pub link: Rgba,
+    /// The ground of a default button.
     pub button_default: Rgba,
+    /// The ground of a default button under the pointer.
     pub button_default_hover: Rgba,
+    /// The wash that lifts a surface, white on a dark theme and dark on a
+    /// light one.
     pub overlay: Rgba,
+    /// The placeholder a loading skeleton is drawn in.
     pub shimmer: Rgba,
+    /// The line that joins a reply to the message it answers.
     pub reply_spine: Rgba,
+    /// A tooltip's ground.
     pub tooltip: Rgba,
+    /// The ground behind an avatar, while it loads or when there is none.
     pub avatar: Rgba,
 }
 
 /// A theme read from CSS, with what it says about itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeFile {
+    /// The theme's id, `css:` and a slug of its name, made unique when two
+    /// themes share it.
     pub id: String,
+    /// The theme's name, from `@name`, or the file's stem when the CSS names
+    /// none.
     pub name: String,
+    /// Who wrote it, from `@author`.
     pub author: Option<String>,
+    /// Its one-line summary, from `@description`.
     pub description: Option<String>,
+    /// Its version string, from `@version`.
     pub version: Option<String>,
+    /// The licence it is offered under, from `@license`.
     pub license: Option<String>,
+    /// Where its source lives, from `@source`.
     pub source: Option<String>,
+    /// The CSS file it came from, or `None` when it was read from a string.
     pub path: Option<PathBuf>,
+    /// The colours the window paints with.
     pub palette: Palette,
+    /// The fonts, shape, motion and effects the theme names.
     pub look: Look,
     /// Colours and shape values won by selectors that name the native
     /// sidebar, chat, member list and so on.
@@ -413,9 +517,11 @@ pub struct ThemeFile {
     pub page_layout: Option<PageLayout>,
     /// The page's paint list from style-engine, when paint was asked for.
     pub paint: Option<crate::Paint>,
+    /// The font files the theme carries, ready for the window's font system.
     pub fonts: Vec<Font>,
     /// The custom properties Appearance can change, with their labels.
     pub options: Vec<crate::ThemeOption>,
+    /// Notes about what the reader could not use, one sentence each.
     pub warnings: Vec<String>,
     /// What the reader left out and where, when [`Options::diagnostics`] asked
     /// for it.
@@ -435,14 +541,18 @@ impl ThemeFile {
 /// What [`scan`] found.
 #[derive(Clone, Debug, Default)]
 pub struct Scan {
+    /// The themes that were read, sorted by name.
     pub themes: Vec<ThemeFile>,
+    /// The files that could not be read at all, and why.
     pub problems: Vec<Problem>,
 }
 
 /// A theme file that could not be read, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
+    /// The file that was skipped.
     pub path: PathBuf,
+    /// The sentence that says why it was skipped.
     pub message: String,
 }
 
@@ -467,6 +577,7 @@ pub enum Severity {
 /// parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// How much of the rule or declaration was lost.
     pub severity: Severity,
     /// The file the declaration sits in, when it is not the theme itself.
     pub file: Option<PathBuf>,
@@ -474,12 +585,14 @@ pub struct Diagnostic {
     pub line: u32,
     /// A 1-based column, or 0.
     pub column: u32,
+    /// One sentence on what was left out and why.
     pub message: String,
 }
 
 /// How to read a theme.
 #[derive(Clone, Debug)]
 pub struct Options {
+    /// Which appearance to read the theme for.
     pub mode: Mode,
     /// A colour to force on the theme, as ReCore's accent picker does.
     pub accent: Option<Rgba>,
@@ -511,6 +624,7 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Defaults, read for `mode`.
     pub fn with_mode(mode: Mode) -> Self {
         Self {
             mode,

@@ -10,13 +10,18 @@ use std::fmt::Write as _;
 /// A colour with straight (not premultiplied) alpha, as CSS works them out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Rgba {
+    /// The red channel, 0 to 255.
     pub r: u8,
+    /// The green channel, 0 to 255.
     pub g: u8,
+    /// The blue channel, 0 to 255.
     pub b: u8,
+    /// The alpha channel, 0 (clear) to 255 (opaque).
     pub a: u8,
 }
 
 impl Rgba {
+    /// A clear black, which paints nothing.
     pub const TRANSPARENT: Self = Self {
         r: 0,
         g: 0,
@@ -24,15 +29,18 @@ impl Rgba {
         a: 0,
     };
 
+    /// An opaque colour from its red, green and blue channels.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
     }
 
+    /// A colour from all four channels, as CSS `rgba()` writes them.
     #[allow(clippy::self_named_constructors, reason = "rgba is the CSS name")]
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
 
+    /// The same colour at another alpha, 0 to 255.
     pub const fn with_alpha(self, a: u8) -> Self {
         Self { a, ..self }
     }
