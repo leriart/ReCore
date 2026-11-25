@@ -925,6 +925,7 @@ fn apply(
         )
         && let Some(radius) = length(computed.value(PropertyId::BorderTopLeftRadius), computed)
         && radius > 0.0
+        && let Some(radius) = crate::css::bounds::within(radius, crate::css::bounds::RADIUS)
     {
         style.radius = Some(radius);
     }
@@ -942,7 +943,11 @@ fn apply(
         style.font_family = Some(family);
     }
 
+    // A zero or negative size is not a length CSS accepts; an absurd one is
+    // held to the largest size the window draws a heading at.
     if let Some(size) = length(computed.value(PropertyId::FontSize), computed)
+        && size > 0.0
+        && let Some(size) = crate::css::bounds::within(size, crate::css::bounds::TEXT)
         && (size - 16.0).abs() > 0.01
     {
         match role {
@@ -957,6 +962,7 @@ fn apply(
     if matches!(role, Role::Root)
         && computed.value(PropertyId::LetterSpacing).is_some()
         && let Some(spacing) = length(computed.value(PropertyId::LetterSpacing), computed)
+        && let Some(spacing) = crate::css::bounds::within(spacing, crate::css::bounds::TRACKING)
     {
         style.letter_spacing = Some(spacing);
     }
@@ -981,8 +987,9 @@ fn apply(
     if !hover
         && (computed.opacity() - 1.0).abs() > 0.001
         && let Some(slot) = native::opacity_slot(style, role)
+        && let Some(opacity) = crate::css::bounds::opacity(computed.opacity())
     {
-        *slot = Some(computed.opacity());
+        *slot = Some(opacity);
     }
 
     if let Some(shadow) = shadow(computed, dark) {
@@ -1329,11 +1336,16 @@ fn shadow(computed: &ComputedStyle, dark: bool) -> Option<Shadow> {
     };
     list.iter().find(|shadow| !shadow.inset).map(|shadow| {
         let color = color(shadow.color, computed, dark).unwrap_or(Rgba::rgba(0, 0, 0, 0x80));
-        let offset_x = resolve_length(&shadow.offset_x, computed, 0.0).unwrap_or(0.0);
-        let offset_y = resolve_length(&shadow.offset_y, computed, 0.0).unwrap_or(0.0);
-        let blur = resolve_length(&shadow.blur, computed, 0.0)
-            .unwrap_or(0.0)
-            .max(0.0);
+        let shadow_bound = |value: f32| {
+            crate::css::bounds::within(value, crate::css::bounds::SHADOW).unwrap_or(0.0)
+        };
+        let offset_x = shadow_bound(resolve_length(&shadow.offset_x, computed, 0.0).unwrap_or(0.0));
+        let offset_y = shadow_bound(resolve_length(&shadow.offset_y, computed, 0.0).unwrap_or(0.0));
+        let blur = shadow_bound(
+            resolve_length(&shadow.blur, computed, 0.0)
+                .unwrap_or(0.0)
+                .max(0.0),
+        );
         Shadow {
             color,
             offset_x,
@@ -1503,6 +1515,7 @@ fn page_gap(style: &ComputedStyle) -> Option<f32> {
         .into_iter()
         .filter_map(|property| length(style.value(property), style))
         .find(|gap| *gap > 0.0)
+        .and_then(|gap| crate::css::bounds::within(gap, crate::css::bounds::GAP))
 }
 
 fn engine_gradient(

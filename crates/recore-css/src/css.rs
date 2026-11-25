@@ -17,6 +17,38 @@ use crate::color::{Rgba, parse as parse_color};
 /// CSS pixels. It is the same reference the layout pass uses.
 pub(crate) const VIEWPORT: (f32, f32) = (1280.0, 720.0);
 
+/// The ranges a theme's numbers are held to before the window draws them.
+///
+/// A theme is data and may say anything; a negative font size or a radius of
+/// a billion pixels would reach iced's layout as a crash or an empty window.
+/// CSS asks a browser to clamp some of these at computed-value time and to
+/// drop invalid lengths; the interpreter does both, at different points, so
+/// a hostile or damaged file can only produce a usable window.
+pub(crate) mod bounds {
+    /// A text size, in CSS pixels: the smallest one still legible and the
+    /// largest the window ever draws one of its own headings.
+    pub(crate) const TEXT: (f32, f32) = (6.0, 200.0);
+    /// A line's or a panel's radius.
+    pub(crate) const RADIUS: (f32, f32) = (0.0, 64.0);
+    /// The space between the window's panels.
+    pub(crate) const GAP: (f32, f32) = (0.0, 64.0);
+    /// How far apart a heading's letters sit.
+    pub(crate) const TRACKING: (f32, f32) = (-8.0, 32.0);
+    /// A shadow's offsets and blur.
+    pub(crate) const SHADOW: (f32, f32) = (-512.0, 512.0);
+
+    /// `value` held to `range`, or `None` when it is not a finite number.
+    pub(crate) fn within(value: f32, range: (f32, f32)) -> Option<f32> {
+        value.is_finite().then(|| value.clamp(range.0, range.1))
+    }
+
+    /// `value` as CSS reads an `opacity`: every number is valid, and the
+    /// computed value is held to 0..1.
+    pub(crate) fn opacity(value: f32) -> Option<f32> {
+        within(value, (0.0, 1.0))
+    }
+}
+
 /// One declaration, and whether it carried `!important`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declaration {

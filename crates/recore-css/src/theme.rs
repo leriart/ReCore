@@ -2146,9 +2146,17 @@ fn look(
     }
     Look {
         font_family,
-        font_size: length(vars, &["--font-size", "--text-size"]),
-        letter_spacing: length(vars, &["--rl-tracking", "--letter-spacing"]),
-        radius: length(vars, &["--rl-radius", "--radius-md", "--radius-sm"]),
+        font_size: length(vars, &["--font-size", "--text-size"]).and_then(|size| {
+            if size > 0.0 {
+                crate::css::bounds::within(size, crate::css::bounds::TEXT)
+            } else {
+                None
+            }
+        }),
+        letter_spacing: length(vars, &["--rl-tracking", "--letter-spacing"])
+            .and_then(|spacing| crate::css::bounds::within(spacing, crate::css::bounds::TRACKING)),
+        radius: length(vars, &["--rl-radius", "--radius-md", "--radius-sm"])
+            .and_then(|radius| crate::css::bounds::within(radius, crate::css::bounds::RADIUS)),
         frame: vars.first_color(
             &[
                 "--app-frame-background",
@@ -2157,7 +2165,8 @@ fn look(
             ],
             !palette.dark,
         ),
-        panel_gap: length(vars, &["--gap", "--spacing", "--rl-gap"]),
+        panel_gap: length(vars, &["--gap", "--spacing", "--rl-gap"])
+            .and_then(|gap| crate::css::bounds::within(gap, crate::css::bounds::GAP)),
         panel_radius: length(
             vars,
             &[
@@ -2167,7 +2176,8 @@ fn look(
                 "--radius-md",
                 "--rl-radius",
             ],
-        ),
+        )
+        .and_then(|radius| crate::css::bounds::within(radius, crate::css::bounds::RADIUS)),
         motion,
         pixel_icons: vars
             .resolve(vars.get("--rl-icons").unwrap_or("off"))

@@ -538,7 +538,11 @@ comments, NUL bytes, invalid numbers, reference loops and a variable that
 names itself twice at every level (which would be 2^n substitutions) all
 end without a panic, a stack overflow or a run that never returns. A value
 that would grow past 1 MiB or read more than 4096 variables is treated as
-missing. `crates/recore-css/tests/robust.rs` cuts every bundled theme at
+missing. A number that reaches the window is held to the range it draws in:
+a heading's size to 6–200 px, a radius and the space between panels to
+0–64 px, letter spacing to −8–32 px, a shadow's offsets and blur to ±512 px.
+A size of zero or less is not a length CSS accepts, so the window keeps its
+own. `crates/recore-css/tests/robust.rs` cuts every bundled theme at
 120 places and damages each with random fragments, and checks the hostile
 inputs by name.
 

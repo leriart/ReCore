@@ -783,6 +783,7 @@ fn apply(style: &mut NativeStyle, write: Write<'_>, value: &str, dark: bool) {
                     Role::Root | Role::Rail | Role::Sidebar | Role::Chat | Role::Members
                 )
                 && let Some(radius) = length(value)
+                && let Some(radius) = crate::css::bounds::within(radius, crate::css::bounds::RADIUS)
             {
                 style.radius = Some(radius);
             }
@@ -798,7 +799,13 @@ fn apply(style: &mut NativeStyle, write: Write<'_>, value: &str, dark: bool) {
             }
         }
         "font-size" => {
-            if let Some(size) = length(value) {
+            // A zero or negative size is not a length CSS accepts (the engine
+            // settles a negative one to zero); an absurd one is held to the
+            // largest size the window draws a heading at.
+            if let Some(size) = length(value)
+                && size > 0.0
+                && let Some(size) = crate::css::bounds::within(size, crate::css::bounds::TEXT)
+            {
                 match role {
                     Role::Root => style.font_size = Some(size),
                     Role::Category => style.category_size = Some(size),
@@ -811,6 +818,8 @@ fn apply(style: &mut NativeStyle, write: Write<'_>, value: &str, dark: bool) {
         "letter-spacing" => {
             if matches!(role, Role::Root)
                 && let Some(spacing) = length(value)
+                && let Some(spacing) =
+                    crate::css::bounds::within(spacing, crate::css::bounds::TRACKING)
             {
                 style.letter_spacing = Some(spacing);
             }
@@ -1134,9 +1143,12 @@ fn fraction(value: &str) -> Option<f32> {
             .trim()
             .parse::<f32>()
             .ok()
-            .map(|percent| (percent / 100.0).clamp(0.0, 1.0));
+            .and_then(|percent| crate::css::bounds::opacity(percent / 100.0));
     }
-    value.parse::<f32>().ok().map(|value| value.clamp(0.0, 1.0))
+    value
+        .parse::<f32>()
+        .ok()
+        .and_then(crate::css::bounds::opacity)
 }
 
 pub(crate) fn text_transform(value: &str) -> Option<TextTransform> {
@@ -1165,12 +1177,23 @@ pub(crate) fn shadow(value: &str, light: bool) -> Option<Shadow> {
                 lengths.push(length);
             }
         }
-        if lengths.len() >= 2 {
+        if lengths.len() >= 2
+            && let Some(offset_x) =
+                crate::css::bounds::within(lengths[0], crate::css::bounds::SHADOW)
+            && let Some(offset_y) =
+                crate::css::bounds::within(lengths[1], crate::css::bounds::SHADOW)
+        {
             return Some(Shadow {
                 color: color.unwrap_or(Rgba::rgba(0, 0, 0, 0x80)),
-                offset_x: lengths[0],
-                offset_y: lengths[1],
-                blur: lengths.get(2).copied().unwrap_or(0.0).max(0.0),
+                offset_x,
+                offset_y,
+                blur: lengths
+                    .get(2)
+                    .copied()
+                    .and_then(|blur| {
+                        crate::css::bounds::within(blur.max(0.0), crate::css::bounds::SHADOW)
+                    })
+                    .unwrap_or(0.0),
             });
         }
     }
@@ -2389,6 +2412,71 @@ mod tests {
         );
         assert_eq!(theme.native.sidebar_opacity, Some(0.5));
         assert_eq!(theme.native.panel_opacity, Some(0.75));
+    }
+
+    #[test]
+    fn hostile_numbers_reach_the_window_within_usable_ranges() {
+        let theme = dark(
+            r#"
+            [class*="category_"] { font-size: 0; }
+            [class*="membersGroup_"] { font-size: -12px; }
+            [class*="header_"] { font-size: 99999px; }
+            [class*="sidebar_"] { border-radius: 99999px; }
+            [class*="membersWrap_"] { opacity: 2; }
+            [class*="menu_"] { box-shadow: 1e9px 4px 1e9px #ff0000; }
+            "#,
+        );
+        // A zero or negative size is not a length CSS accepts, so the window
+        // keeps its own; an absurd one is held to the range it draws in.
+        assert_eq!(theme.native.category_size, None);
+        assert_eq!(theme.native.member_heading_size, None);
+        assert_eq!(theme.native.header_size, Some(crate::css::bounds::TEXT.1));
+        assert_eq!(theme.native.radius, Some(crate::css::bounds::RADIUS.1));
+        // The engine drops an opacity outside 0..1 as invalid, so the region
+        // keeps the window's own; a well-formed one is kept.
+        assert_eq!(theme.native.sidebar_opacity, None);
+        assert_eq!(
+            dark(r#"[class*="membersWrap_"] { opacity: 0.9; }"#)
+                .native
+                .panel_opacity,
+            Some(0.9)
+        );
+        let shadow = theme.native.raised_shadow.expect("the menu's shadow");
+        assert!(shadow.offset_x <= crate::css::bounds::SHADOW.1);
+        assert!(shadow.blur <= crate::css::bounds::SHADOW.1);
+        assert!(shadow.offset_y.abs() <= crate::css::bounds::SHADOW.1);
+    }
+
+    #[test]
+    fn hostile_root_variables_reach_the_look_within_usable_ranges() {
+        let theme = dark(
+            r#"
+            :root {
+                --font-size: -20px;
+                --rl-tracking: 9999px;
+                --radius-md: -50px;
+                --gap: -10px;
+            }
+            "#,
+        );
+        assert_eq!(theme.look.font_size, None);
+        assert_eq!(
+            theme.look.letter_spacing,
+            Some(crate::css::bounds::TRACKING.1)
+        );
+        assert_eq!(theme.look.radius, Some(0.0));
+        assert_eq!(theme.look.panel_gap, Some(0.0));
+
+        let huge = dark(
+            r#"
+            :root { --font-size: 99999px; --rl-gap: 1e30px; }
+            body { display: flex; gap: 1e9px; }
+            "#,
+        );
+        assert_eq!(huge.look.font_size, Some(crate::css::bounds::TEXT.1));
+        // `1e30px` is not a number an `f32` holds, so it is no length at all,
+        // and the page's own gap decides.
+        assert_eq!(huge.look.panel_gap, Some(crate::css::bounds::GAP.1));
     }
 
     #[test]
