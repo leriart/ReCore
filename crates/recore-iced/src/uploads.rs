@@ -43,7 +43,8 @@ const DISC: Color = crate::style::SMOKE;
 /// The drop card's width, and the dim under it, a shade lighter than a
 /// dialog's.
 const CARD: f32 = 310.0;
-const DROP_DIM: Color = Color::from_rgba8(0, 0, 0, 0xa6 as f32 / 255.0);
+/// How far the dim under the drop card goes.
+const DROP_DIM: f32 = 0.65;
 /// How long after the first file of a drop the drop is taken whole: a
 /// drop comes a file at a time.
 const DROP_GATHER: Duration = Duration::from_millis(30);
@@ -709,11 +710,12 @@ pub fn drop_view<'a>(ctx: crate::ctx::Ctx<'a>) -> Option<Element<'a, Message>> {
             shadow: card_shadow(theme),
             ..rounded(ground, 10)
         });
+    let dim = crate::media::scrim(theme, DROP_DIM);
     Some(
         iced::widget::mouse_area(
             container(card)
                 .center(Length::Fill)
-                .style(|_| crate::style::fill(DROP_DIM)),
+                .style(move |_| crate::style::fill(dim)),
         )
         .on_press(Message::Write(Write::Uploads(Event::Understood)))
         .into(),

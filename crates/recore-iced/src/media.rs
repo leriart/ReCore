@@ -5,6 +5,9 @@
 //! (one at its own size, several as square tiles two to a row).
 //! Attachments, galleries, embeds' pictures, cards' thumbnails and stickers
 //! all show through it.
+//!
+//! The washes the window paints with are here too: [`scrim`], the dim
+//! under a card, and [`COVER`], the mark over a picture.
 
 use std::sync::Arc;
 
@@ -23,8 +26,20 @@ pub const TILE_GAP: f32 = 4.0;
 /// A spoiler's blur: the picture averaged down to this many pixels across,
 /// drawn large.
 const BLUR_SIDE: u32 = 10;
-/// The spoiler cover's dimming.
-const COVER_DIM: Color = Color::from_rgba8(0, 0, 0, 0x59 as f32 / 255.0);
+
+/// The wash a scrim paints over the window or a panel: the theme's own
+/// ground, darkened, so it dims a light theme and a dark one alike.
+pub fn scrim(theme: &crate::theme::Theme, alpha: f32) -> Color {
+    let ground = crate::theme::mix(theme.chat, Color::BLACK, 0.9);
+    Color { a: alpha, ..ground }
+}
+
+/// The ground of a mark over a picture: the spoiler's cover and its label,
+/// the GIF badge, the video's controls. One black for all of them, so a
+/// spoiler looks the same wherever it is drawn.
+pub const COVER: Color = crate::style::SMOKE;
+/// How far the spoiler's cover dims the picture under it.
+const COVER_DIM: f32 = 0.35;
 
 /// How a picture fills its box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,10 +332,10 @@ impl<'a> crate::ctx::Ctx<'a> {
                 .padding([0, 12])
                 .height(28)
                 .align_y(Alignment::Center)
-                .style(|_| rounded(crate::style::SMOKE, 14)),
+                .style(|_| rounded(COVER, 14)),
         )
         .center(Length::Fill)
-        .style(move |_| rounded(COVER_DIM, radius))
+        .style(move |_| rounded(scrim(self.look.theme, COVER_DIM), radius))
         .into()
     }
 }
