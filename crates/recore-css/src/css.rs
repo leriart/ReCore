@@ -1362,6 +1362,9 @@ fn supports_value(condition: &str) -> bool {
             .strip_prefix('(')
             .and_then(|rest| matching_paren(rest).map(|end| &rest[..end]))
         {
+            // The engine's own selector support is narrower than ReCore's
+            // regions (no `:nth-` structure), so the question stays whether
+            // the window's matcher knows the feature.
             let lower = inner.to_ascii_lowercase();
             return !(lower.contains(":nth-")
                 || lower.contains(":first-")
@@ -1386,7 +1389,37 @@ fn supports_value(condition: &str) -> bool {
         .split_once(':')
         .map(|(property, _)| property.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    !UNSUPPORTED.contains(&property.as_str())
+    if UNSUPPORTED.contains(&property.as_str()) {
+        return false;
+    }
+    // Everything else is asked of the same engine that will read the sheet:
+    // a declaration it drops is one this window cannot use either, so a
+    // theme's `@supports` fallback takes the branch a browser would.
+    declaration_is_valid(inner)
+}
+
+/// Whether the engine reads `condition` (`display: grid`) as a declaration.
+fn declaration_is_valid(condition: &str) -> bool {
+    let Some((property, value)) = condition.split_once(':') else {
+        return false;
+    };
+    // A custom property is always a supported value, and `var()` is resolved
+    // where it is used, not here.
+    if property.trim().starts_with("--") || value.contains("var(") {
+        return true;
+    }
+    // The colour functions the reader reduces before the engine sees them
+    // are supported here even though the engine alone drops them.
+    let reduced = crate::semantic::replace_colors(value, false).unwrap_or_else(|| value.to_owned());
+    let sheet = crate::style_engine::css::stylesheet::parse_stylesheet(&format!(
+        "x {{ {property}: {reduced} }}"
+    ));
+    !sheet.report.warnings.iter().any(|warning| {
+        matches!(
+            warning.severity,
+            crate::style_engine::error::ParseSeverity::Dropped
+        )
+    })
 }
 
 /// Splits on `and`/`or` outside parentheses.
@@ -2931,6 +2964,27 @@ mod tests {
         );
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(sheet.rules[0].declarations[0].name, "--yes");
+    }
+
+    #[test]
+    fn a_supports_condition_asks_what_the_engine_can_read() {
+        let applies = |condition: &str| supports_value(condition);
+        // A declaration the engine reads, or the reader reduces, is there.
+        assert!(applies("(display: grid)"));
+        assert!(applies("(color: color-mix(in srgb, red, blue))"));
+        assert!(applies("(color: var(--brand, red))"));
+        assert!(applies("(--brand: red)"));
+        assert!(applies("(box-shadow: 0 1px 2px #00000080)"));
+        // A property or a value it does not know is not, and `not` takes the
+        // other branch, which is what a theme's fallback expects.
+        assert!(!applies("(bogus-prop: 1)"));
+        assert!(!applies("(display: bogus)"));
+        assert!(applies("not (bogus-prop: 1)"));
+        assert!(!applies("(display: grid) and (color: bogus)"));
+        assert!(applies("(display: grid) or (color: bogus)"));
+        // What this window cannot paint stays out, as the docs say.
+        assert!(!applies("(backdrop-filter: blur(2px))"));
+        assert!(applies("not (backdrop-filter: blur(2px))"));
     }
 
     #[test]

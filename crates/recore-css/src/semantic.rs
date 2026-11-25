@@ -636,7 +636,7 @@ fn color_functions(value: &str, light: bool) -> Cow<'_, str> {
     }
 }
 
-fn replace_colors(value: &str, light: bool) -> Option<String> {
+pub(crate) fn replace_colors(value: &str, light: bool) -> Option<String> {
     const FUNCTIONS: &[&str] = &[
         "color-mix(",
         "light-dark(",

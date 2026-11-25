@@ -165,10 +165,12 @@ theme carries:
   browser. A `@layer reset, base, theme;` statement fixes the layer order
   before its blocks, and `@import "x.css" layer(theme) screen` puts the
   import in a layer and applies its media condition. `@supports` conditions
-  and the media/supports/layer conditions after an `@import` are applied,
-  and a feature the native window cannot paint — a `backdrop-filter`, a
-  mask, a container type or a view transition — takes its `not (...)` branch
-  instead. `@property` gives a variable its syntax and initial value, which
+  and the media/supports/layer conditions after an `@import` are applied:
+  a declaration is supported when the engine reads it (or the reader
+  reduces it to sRGB, as with `color-mix()`), so a theme's fallback takes
+  the branch a browser would, and a feature the native window cannot paint
+  — a `backdrop-filter`, a mask, a container type or a view transition —
+  takes its `not (...)` branch instead. `@property` gives a variable its syntax and initial value, which
   fills the variable when the theme does not set it. An at-rule ReCore does
   not read (`@starting-style`, `@page`, a future one) is kept in the file
   and its rules are not applied, as a browser does, and the note says
