@@ -4,6 +4,76 @@ ReCore's current release is shown in Settings > About. The release workflow
 uses the same section for the release page, and publishes this file with the
 release.
 
+## 0.5.8 - 2026-11-25
+
+### Themes
+
+- Gradients read stop lengths (`px`, `em` and the units a theme settles) and
+  a conic gradient's angles, keep hard stops such as `#fff 0% 50%` as two
+  stops, and follow `light-dark()` with the window's appearance. Stops no
+  longer fall back to even spacing or lose their colour.
+- `color-mix()` travels the hue along the shorter, longer, increasing or
+  decreasing arc its method names. `color()` reads `rec2020`, `xyz-d65`,
+  `a98-rgb` and `prophoto-rgb` through their own matrices, `color(from ...)`
+  parses, and a non-finite channel is no colour instead of black. Mixing
+  in sRGB keeps its exact half.
+- Specificity is CSS's own `(a, b, c)` triple: `:where()` adds nothing,
+  `:is()` takes its most specific argument, `:not()` is not counted twice
+  and an attribute's value is not a class. An `!important` declaration
+  reverses the layer order, so the first layer wins and an unlayered rule
+  is the weakest.
+- A nested theme is bounded: 100,000 rules, 32 selectors in one expansion
+  and 32 MiB of text, and a cap keeps what was read and says so. `@PROPERTY`
+  is read in any case, a media query list is true only when the whole list
+  is, and a `@property` value that does not match its syntax falls back to
+  its initial value.
+- The appearance class stays on the page: `.theme-dark` no longer paints
+  every surface the same colour. A generated class named inside an
+  attribute selector matches by its stable stem, as a class selector does.
+- A theme option is looked up in a set rather than against every known name,
+  sort keys are made once, the resolution cache is bounded by bytes, and a
+  folder of themes is evicted one at a time. A large theme reads in a
+  fraction of the time without rebuilding its light palette.
+- Every scrim comes from the theme's own ground: the drop card, toast,
+  thread dim, picture viewer, video shade, spoiler cover, drag shadow and
+  trending gradient no longer use a hard black or white wash.
+
+### Discord
+
+- The gateway updates pins, AutoMod rules, integrations, invites, webhooks
+  and a scheduled event's subscribers as they change, instead of waiting
+  for a reload, and logs an event it does not know rather than dropping it
+  silently.
+- Every Discord request has a deadline, the gateway asks the server for its
+  address and falls back to the known one, and its queues are bounded. A
+  stalled connection or a burst no longer leaves a request hanging or grows
+  without limit.
+- Scheduled events can be listed, created, changed and ended; a server's
+  members and threads can be paged, and a webhook read.
+- The account's Discord message display, theme and language settings are
+  read and written, ready for the window to show them.
+
+### Interface
+
+- Loading states move: a ring of eight dots trails behind its head while
+  earlier messages, forum posts or a search are fetched, beside the words
+  that already said so.
+- The emoji picker shrinks into a window narrower than itself instead of
+  being drawn off the left edge, and the account's name in Settings ends in
+  an ellipsis instead of mid-glyph.
+- Member-list headings use the theme's muted ink, member hover and active
+  rows use its hover and active washes, server tag chips use its overlay,
+  and a code block takes a light palette on a light theme. Channel names
+  and topics end in an ellipsis at the last glyph that fits.
+
+### Fixes
+
+- A theme with a large option set, a deeply nested rule, a huge value or a
+  hostile colour no longer stalls or aborts the window; caps keep what was
+  read and the diagnostics say what was left.
+- A themed scrim reads as a dim on a light theme instead of a smudge, and a
+  spoiler's cover is the same colour in a gallery and on a file.
+
 ## 0.5.7 - 2026-11-24
 
 ### Themes
